@@ -83,10 +83,25 @@ beacon snippet（写法同 GA4 的 gtag 那条规则）。`cf-analytics-setup.mj
 ```bash
 node <rankup-skill-dir>/scripts/cf-analytics-setup.mjs status <domain>   # 查是否已启用、auto_install 当前值
 node <rankup-skill-dir>/scripts/cf-analytics-setup.mjs enable <domain>   # 启用，auto_install 默认 false
+node <rankup-skill-dir>/scripts/cf-analytics-setup.mjs verify <domain>   # 只读三件套核验，见下
 ```
 
 拿到 `site_token` 后，把 CF WA 的 beacon snippet 按 GA4 同款延迟策略手动写进
 `<head>`（监听一次性的首次交互事件，同时挂 6s 兜底，谁先到就插入）。
+
+### 规范：两条注入路径不得并存
+
+**`auto_install=false` + 手嵌 beacon 放进站点统一的延迟加载器 + token 只从
+API 或页面 DOM 取，不手抄、不并存两条注入路径。** 这是唯一正确的组合：
+
+- `auto_install=false`——边缘不自动注入，注入时机完全交给代码里「首次交互或
+  6s 兜底」的统一延迟加载器（与 GA4/Ahrefs WA 同一套逻辑，不要各写一份）。
+- token 只从 `cf-analytics-setup.mjs status` 的输出或 CF Dashboard 的 Web
+  Analytics 设置页取，不从记忆、聊天记录或别的项目的代码里抄——`site_tag`
+  与 `site_token` 同形（都是 32 位十六进制），抄错不报任何错。
+- **两条注入路径不得同时存在**：`auto_install=true` 的同时又在代码里手嵌了
+  一份 snippet，会变成边缘 + 代码各打一次点，GraphQL `count > 0` 看起来正常，
+  实际上边缘那份完全绕过了延迟加载设计，且两份数据是否重复计数未经核实。
 
 ### 验证
 
@@ -94,6 +109,19 @@ node <rankup-skill-dir>/scripts/cf-analytics-setup.mjs enable <domain>   # 启�
 必须再用 GraphQL 查 `rumPageloadEventsAdaptiveGroups(filter:{siteTag}) { count }`，
 `count > 0` 才算接通；`site_token` 填成 `site_tag` 不会报错，beacon 照样 200，
 但会永远 0 数据。
+
+**`count > 0` 本身盖不住上面两个坑**——两条注入路径同时打点、或 token 填成了
+另一个 site 的，`count` 都可能是正数。真实项目复盘过这两个坑各出现一次，
+都是脚本层面能查、GraphQL 数字本身查不出的：
+
+```bash
+node <rankup-skill-dir>/scripts/cf-analytics-setup.mjs verify <domain>
+```
+
+只读，不改任何 CF 配置：从 API 取 `site_tag`/`site_token`/`auto_install`，
+`fetch` 线上 HTML 抠出所有 `data-cf-beacon` 里的 token 逐个比对，判 token 是否
+一致、是否重复注入、beacon 是否干脆缺失，GraphQL count 只作参考（已验证
+2026-09-13，在一个真实启用了 CF WA 的域名上跑通三件套核验）。
 
 ## 1. Microsoft Clarity
 

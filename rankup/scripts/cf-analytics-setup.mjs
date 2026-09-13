@@ -5,6 +5,7 @@
  * 用法：
  *   node <rankup-skill-dir>/scripts/cf-analytics-setup.mjs status <domain>
  *   node <rankup-skill-dir>/scripts/cf-analytics-setup.mjs enable <domain>
+ *   node <rankup-skill-dir>/scripts/cf-analytics-setup.mjs verify <domain>
  *
  * 站点由 Cloudflare 代理时可以用 auto_install：beacon 由边缘在 HTML 响应经过时注入，
  * 不需要改代码、不需要发版。Workers custom domain 本身就是代理态，满足条件。
@@ -15,16 +16,43 @@
  * 以 auto_install: false 创建站点记录，改由代码延迟注入 beacon；status 对已存在且
  * auto_install 为 true 的站点会打印告警。
  *
+ * ── verify：只读核验，抓真实项目踩过的两个坑（2026-09-13 新增）───────
+ *
+ * 真实项目复盘过两次「接了但没生效」，都不会让任何东西变红：
+ *   1. **token 不一致**：代码里手嵌的 `data-cf-beacon` token 与 CF 后台该站
+ *      实际的 `site_token` 对不上——beacon 脚本照样 200 加载、控制台照样绿，
+ *      数据只是流进了别的 site。`site_tag` 与 `site_token` 同形（都是 32 位
+ *      hex），把 token 填成 tag 也是这个症状的一种。
+ *   2. **auto_install 与手嵌脚本同时存在**：zone 上 `auto_install=true`，
+ *      边缘已经在每次响应上自动注入 beacon，代码里又手嵌了一份延迟加载的
+ *      snippet——两份 beacon 同时打点，GraphQL `count > 0` 反而把这个问题
+ *      掩盖掉（有数据 ≠ 接入方式正确），而边缘注入那份完全绕过了「首次交互
+ *      或 6s 兜底」的延迟加载设计。
+ * `verify` 三件事都做：(a) 从 CF API 取 `site_tag`/`site_token`/`auto_install`；
+ * (b) `fetch` 线上 HTML，用 `extractCfBeaconTokens` 抠出所有 `data-cf-beacon`
+ * 里的 token；(c) 查 GraphQL `rumPageloadEventsAdaptiveGroups` 近 7 天 count。
+ * 三者交叉出「token 一致吗」「是不是重复注入」「beacon 是不是干脆缺失」三条
+ * 判定，count 只作参考，**不能单独当接通的证据**（两份 beacon 同时打点时
+ * count 一样 > 0）。全程只读，不改任何 CF 配置。
+ *
+ * 规范（同步进 references/analytics-platforms.md「CF WA」节，两处不得各存一份）：
+ * **`auto_install=false` + 手嵌 beacon 放进站点统一的延迟加载器 + token 只从
+ * API 或页面 DOM 取，不手抄，不并存两条注入路径。**
+ *
  * 凭据：只从环境变量 CLOUDFLARE_API_TOKEN 读，读不到就退到 <repo>/.cf-token
  * （该文件已被 .gitignore 排除）。真实值不打印、不落盘、不进日志。
  *
  * 需要的权限：Account > Account Analytics > Edit（RUM）+ Zone > Zone > Read。
  * 不要用 Global API Key：它不能限定 scope，泄露即等于整个账号。
  *
- * 已验证：2026-08-21；auto_install 默认关闭复验：2026-09-12
+ * 已验证：2026-08-21；auto_install 默认关闭复验：2026-09-12；
+ * verify 三件套（token 比对 / 重复注入判定 / GraphQL count）：2026-09-13
  */
 import { readFileSync, existsSync } from "node:fs"
 import { join } from "node:path"
+import { realpath } from "node:fs/promises"
+import path from "node:path"
+import { pathToFileURL } from "node:url"
 
 const API = "https://api.cloudflare.com/client/v4"
 
@@ -67,8 +95,8 @@ Global Key 不能限定范围，泄露即等于整个账号。`)
   return { Authorization: `Bearer ${t}` }
 }
 
-async function cf(path, init = {}) {
-  const r = await fetch(`${API}${path}`, {
+async function cf(path_, init = {}) {
+  const r = await fetch(`${API}${path_}`, {
     ...init,
     headers: {
       ...authHeaders(),
@@ -79,9 +107,43 @@ async function cf(path, init = {}) {
   const j = await r.json().catch(() => ({}))
   if (!j.success) {
     const msg = (j.errors || []).map((e) => `${e.code} ${e.message}`).join("; ")
-    throw new Error(`${init.method || "GET"} ${path} → HTTP ${r.status}: ${msg || "未知错误"}`)
+    throw new Error(`${init.method || "GET"} ${path_} → HTTP ${r.status}: ${msg || "未知错误"}`)
   }
   return j.result
+}
+
+/**
+ * GraphQL 走同一个 API host 的 /graphql 端点，鉴权与 REST 端点一致。
+ * `errors` 数组存在时 GraphQL 惯例是仍然 200，所以不能只看 HTTP 状态。
+ */
+async function cfGraphQL(query, variables) {
+  const r = await fetch(`${API}/graphql`, {
+    method: "POST",
+    headers: { ...authHeaders(), "Content-Type": "application/json" },
+    body: JSON.stringify({ query, variables }),
+  })
+  const j = await r.json().catch(() => ({}))
+  if (j.errors?.length) {
+    throw new Error(j.errors.map((e) => e.message).join("; "))
+  }
+  return j.data
+}
+
+async function rumPageloadCount(accountId, siteTag, sinceIso) {
+  const data = await cfGraphQL(
+    `query ($accountTag: string!, $siteTag: string!, $since: string!) {
+      viewer {
+        accounts(filter: { accountTag: $accountTag }) {
+          rumPageloadEventsAdaptiveGroups(filter: { siteTag: $siteTag, date_geq: $since }, limit: 1) {
+            count
+          }
+        }
+      }
+    }`,
+    { accountTag: accountId, siteTag, since: sinceIso },
+  )
+  const count = data?.viewer?.accounts?.[0]?.rumPageloadEventsAdaptiveGroups?.[0]?.count
+  return typeof count === "number" ? count : null
 }
 
 function reportZone(z) {
@@ -109,7 +171,7 @@ function reportSite(s) {
   if (!s.auto_install) {
     console.log(`\n✅ auto_install 已关闭（这是期望状态）—— 手动把上面的 snippet 嵌进页面，`)
     console.log(`   延迟到首次交互或 6s 兜底再注入，data-cf-beacon 里填 site_token，不是 site_tag。`)
-    console.log(`   两个都是 32 位十六进制，填错不报错、beacon 照样 200 加载，只是永远 0 数据。`)
+    console.log(`   两个都是 32 位十六进制，填错不报错、beacon 照样 200，只是永远 0 数据。`)
   } else {
     console.log(`\n⚠️ auto_install 为 true —— 边缘会在每次响应上自动注入 beacon，绕过代码里`)
     console.log(`   任何延迟加载逻辑，/cdn-cgi/rum 会成为最长关键请求链之一。`)
@@ -117,46 +179,222 @@ function reportSite(s) {
     console.log(`   Dashboard 的 Web Analytics 设置里关掉，或删除后用本脚本 enable 重建`)
     console.log(`   （enable 默认创建时就是 auto_install: false）。`)
   }
-  console.log(`\n验收不能停在「HTML 里有 cloudflareinsights」。用 GraphQL 查 count：`)
+  console.log(`\n验收不能停在「HTML 里有 cloudflareinsights」。用 GraphQL 查 count，`)
+  console.log(`  或直接跑 \`cf-analytics-setup.mjs verify <domain>\` 做三件套核验：`)
   console.log(`  rumPageloadEventsAdaptiveGroups(filter:{siteTag:"${s.site_tag}", date_geq:"<7 天前>"}) { count }`)
   console.log(`  上线后一天仍是 [] 就是 token 填错或注入没生效。`)
 }
 
-const [cmd, domain] = process.argv.slice(2)
-const askedForHelp = process.argv.slice(2).some((a) => a === "-h" || a === "--help")
-if (askedForHelp || !cmd || !domain) {
-  // 显式 `--help` 是成功，退出码 0；什么都不给才是用法错误。
-  const out = askedForHelp ? console.log : console.error
-  out("用法: cf-analytics-setup.mjs <status|enable> <domain>")
-  process.exit(askedForHelp ? 0 : 2)
+/* ── 纯函数：token 抠取与三件套判定（可脱离网络单测） ──────────── */
+
+/**
+ * 从线上 HTML 里抠出所有 `data-cf-beacon` 属性里声明的 token。
+ * 属性值是一段 JSON（`{"token":"..."}`），引号可能是单引号也可能是双引号。
+ * 解析失败的片段不丢弃——记一条 `UNPARSED:` 前缀的原始片段，让「抓到了但读不出 token」
+ * 和「压根没有这个属性」在返回值里可分辨，不静默合并成同一个「没有」。
+ */
+export function extractCfBeaconTokens(html) {
+  const tokens = []
+  const re = /data-cf-beacon\s*=\s*(['"])([\s\S]*?)\1/gi
+  let m
+  while ((m = re.exec(String(html || "")))) {
+    const raw = m[2].replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, "&")
+    try {
+      const obj = JSON.parse(raw)
+      if (obj && typeof obj.token === "string" && obj.token) {
+        tokens.push(obj.token)
+        continue
+      }
+    } catch {
+      /* 落到下面记原始片段 */
+    }
+    tokens.push(`UNPARSED:${raw.slice(0, 80)}`)
+  }
+  return tokens
 }
 
-const zones = await cf(`/zones?name=${encodeURIComponent(domain)}`)
-if (!zones.length) throw new Error(`${domain} 不在这个账号里，先跑 cf-zone-setup.mjs create`)
-const zone = zones[0]
-
-const accounts = await cf("/accounts")
-const accountId = process.env.CF_ACCOUNT_ID || accounts[0].id
-
-// 必须分页：默认每页 10 条，账号站点一多就会把已存在的条目判成「不存在」而重复创建。
-const existing = await cf(`/accounts/${accountId}/rum/site_info/list?per_page=100`)
-const hit = (existing || []).find((s) => s.ruleset?.zone_tag === zone.id)
-if (hit) {
-  console.log(`Web Analytics 已启用：\n`)
-  reportSite(hit)
-  process.exit(0)
-}
-if (cmd === "status") {
-  console.log(`${domain} 尚未启用 Web Analytics。跑 enable 开启。`)
-  process.exit(0)
+/**
+ * 三件套判定：token 是否一致、是否重复注入、beacon 是否干脆缺失。
+ * 纯函数，不碰网络——三个输入都是调用方已经取到的事实。
+ */
+export function diagnoseCfWebAnalytics({ siteToken, autoInstall, tokensInHtml }) {
+  const validTokens = (tokensInHtml || []).filter((t) => !t.startsWith("UNPARSED:"))
+  const tokenKnown = Boolean(siteToken)
+  const tokenMismatch = tokenKnown && validTokens.length > 0 && !validTokens.includes(siteToken)
+  const duplicateInjection = Boolean(autoInstall) && (tokensInHtml || []).length > 0
+  const noBeaconFound = (tokensInHtml || []).length === 0 && !autoInstall
+  const ok = !tokenMismatch && !duplicateInjection && !noBeaconFound
+  return { ok, tokenKnown, tokenMismatch, duplicateInjection, noBeaconFound, validTokens }
 }
 
-// auto_install 默认 false：【实测，多站复现】边缘自动注入的 beacon 会绕过代码里的延迟
-// 加载逻辑，成为最长关键请求链之一。需要手动把 snippet 写进页面，延迟到首次交互或 6s
-// 兜底后注入，见 references/analytics-platforms.md「CF WA」节。
-const site = await cf(`/accounts/${accountId}/rum/site_info`, {
-  method: "POST",
-  body: JSON.stringify({ zone_tag: zone.id, auto_install: false }),
-})
-console.log(`✅ 已启用 Web Analytics（auto_install: false，需手动嵌延迟加载的 snippet）\n`)
-reportSite(site)
+/* ── 命令 ─────────────────────────────────────────────────── */
+
+async function findSite(domain) {
+  const zones = await cf(`/zones?name=${encodeURIComponent(domain)}`)
+  if (!zones.length) throw new Error(`${domain} 不在这个账号里，先跑 cf-zone-setup.mjs create`)
+  const zone = zones[0]
+
+  const accounts = await cf("/accounts")
+  const accountId = process.env.CF_ACCOUNT_ID || accounts[0].id
+
+  // 必须分页：默认每页 10 条，账号站点一多就会把已存在的条目判成「不存在」而重复创建。
+  const existing = await cf(`/accounts/${accountId}/rum/site_info/list?per_page=100`)
+  const hit = (existing || []).find((s) => s.ruleset?.zone_tag === zone.id)
+  return { zone, accountId, site: hit }
+}
+
+async function doStatusOrEnable(cmd, domain) {
+  const { zone, accountId, site: hit } = await findSite(domain)
+  if (hit) {
+    console.log(`Web Analytics 已启用：\n`)
+    reportSite(hit)
+    return
+  }
+  if (cmd === "status") {
+    console.log(`${domain} 尚未启用 Web Analytics。跑 enable 开启。`)
+    return
+  }
+
+  // auto_install 默认 false：【实测，多站复现】边缘自动注入的 beacon 会绕过代码里的延迟
+  // 加载逻辑，成为最长关键请求链之一。需要手动把 snippet 写进页面，延迟到首次交互或 6s
+  // 兜底后注入，见 references/analytics-platforms.md「CF WA」节。
+  const site = await cf(`/accounts/${accountId}/rum/site_info`, {
+    method: "POST",
+    body: JSON.stringify({ zone_tag: zone.id, auto_install: false }),
+  })
+  console.log(`✅ 已启用 Web Analytics（auto_install: false，需手动嵌延迟加载的 snippet）\n`)
+  reportSite(site)
+}
+
+/** verify：只读三件套核验，不改任何 CF 配置。 */
+async function doVerify(domain) {
+  const { accountId, site: hit } = await findSite(domain)
+  if (!hit) {
+    console.log(`${domain} 尚未启用 Web Analytics，无法 verify。先跑 enable。`)
+    process.exitCode = 1
+    return
+  }
+
+  const url = `https://${domain}`
+  let html = ""
+  try {
+    const r = await fetch(url, { redirect: "follow" })
+    html = await r.text()
+  } catch (e) {
+    console.error(`抓取线上 HTML 失败（${url}）：${e.message}`)
+    process.exitCode = 1
+    return
+  }
+
+  const tokensInHtml = extractCfBeaconTokens(html)
+  const diag = diagnoseCfWebAnalytics({
+    siteToken: hit.site_token,
+    autoInstall: hit.auto_install,
+    tokensInHtml,
+  })
+
+  const since = new Date(Date.now() - 7 * 86_400_000).toISOString().slice(0, 10)
+  let count = null
+  let countError = null
+  try {
+    count = await rumPageloadCount(accountId, hit.site_tag, since)
+  } catch (e) {
+    countError = e.message
+  }
+
+  console.log(`── Cloudflare Web Analytics 只读核验：${domain} ──`)
+  console.log(`site tag        ${hit.site_tag}`)
+  console.log(`site token(API) ${hit.site_token || "(API 未返回——只能人工去面板 Web Analytics 设置页核对)"}`)
+  console.log(`auto_install    ${hit.auto_install}`)
+  console.log(
+    `线上 HTML 里的 data-cf-beacon token  ${tokensInHtml.length ? tokensInHtml.join(", ") : "(未找到)"}`,
+  )
+  console.log()
+  if (!diag.tokenKnown) {
+    console.log(`token 一致：（API 没返回 site_token，无法自动比对，人工去 Web Analytics 设置页核对）`)
+  } else {
+    console.log(
+      diag.tokenMismatch
+        ? `token 一致：❌ 不一致——线上手嵌的 token 与后台 site_token 对不上，这份 beacon 的数据流进了别的 site`
+        : diag.validTokens.length
+          ? `token 一致：✅`
+          : `token 一致：（线上没有手嵌脚本，无从比对）`,
+    )
+  }
+  console.log(
+    diag.duplicateInjection
+      ? `重复注入：❌ auto_install=true 的同时线上还有手嵌 beacon——边缘自动注入会绕过代码里` +
+          `「首次交互或 6s 兜底」的延迟加载逻辑，两条注入路径不该同时存在`
+      : `重复注入：✅ 没有同时出现`,
+  )
+  console.log(
+    diag.noBeaconFound
+      ? `beacon 缺失：❌ auto_install=false 且线上找不到任何手嵌 beacon——等于没接`
+      : `beacon 缺失：✅`,
+  )
+  console.log()
+  console.log(`GraphQL 近 7 天 pageload 数：${count === null ? `取不到（${countError}）` : count}`)
+  console.log(
+    `  count > 0 不能单独当「接通」的证据——两条注入路径同时打点时 count 一样 > 0，`,
+  )
+  console.log(`  掩盖的正是「重复注入」这个问题；判定以上面三行 ✅/❌ 为准，count 只作参考。`)
+
+  console.log()
+  if (!diag.ok) {
+    console.log(`结论：这个站的 CF Web Analytics 接入有问题，见上面标 ❌ 的行。`)
+    console.log(
+      `规范做法：auto_install=false + 手嵌 beacon 放进站点统一的延迟加载器 + token 只从` +
+        ` API 或页面 DOM 取，不手抄、不并存两条注入路径。`,
+    )
+    process.exitCode = 1
+  } else {
+    console.log(`结论：token 一致、没有重复注入、beacon 确实存在——接入方式正常。`)
+  }
+}
+
+function usage() {
+  console.log(`用法: cf-analytics-setup.mjs <status|enable|verify> <domain>
+
+  status <domain>   查询是否已启用，打印 site_tag/site_token/auto_install
+  enable <domain>   启用（auto_install 默认 false，需手动嵌延迟加载的 snippet）
+  verify <domain>   只读核验：抓线上 HTML 比对 data-cf-beacon token、判断是否与
+                    auto_install 重复注入、查 GraphQL 近 7 天 pageload 数`)
+}
+
+async function main() {
+  const [cmd, domain] = process.argv.slice(2)
+  const askedForHelp = process.argv.slice(2).some((a) => a === "-h" || a === "--help")
+  if (askedForHelp || !cmd || !domain) {
+    // 显式 `--help` 是成功，退出码 0；什么都不给才是用法错误。
+    if (askedForHelp) {
+      usage()
+      process.exit(0)
+    }
+    usage()
+    process.exit(2)
+  }
+  if (!["status", "enable", "verify"].includes(cmd)) {
+    usage()
+    process.exit(2)
+  }
+
+  if (cmd === "verify") await doVerify(domain)
+  else await doStatusOrEnable(cmd, domain)
+}
+
+// argv[1] 保留调用时写的路径，import.meta.url 已经过符号链接解析——两边取真实路径
+// 再比较，同 check-version.mjs 的 invokedAsScript()，让测试可以只 import 纯函数
+// （extractCfBeaconTokens / diagnoseCfWebAnalytics）而不触发真的网络请求。
+async function invokedAsScript() {
+  if (process.argv[1] === undefined) return false
+  try {
+    const resolved = await realpath(path.resolve(process.argv[1]))
+    return pathToFileURL(resolved).href === import.meta.url
+  } catch {
+    return false
+  }
+}
+
+if (await invokedAsScript()) {
+  await main()
+}
