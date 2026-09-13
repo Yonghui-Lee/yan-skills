@@ -303,7 +303,114 @@ async function fileBytes(filepath) {
   }
 }
 
-async function checkLifecycle(rankupDir) {
+// 域名定稿的判据不能只看 infrastructure.md 存不存在——实测有过一个早已上线、
+// 域名定稿多时的项目从来没建过 infrastructure.md，于是批 B 逐行核对整段被跳过，
+// 零报警地漏查了搜索平台/Ahrefs WA 等一整批接入。改成多信号 OR：
+// infrastructure.md 有内容，或 integrations.md/checks.md 里出现非 example 的正式
+// 域名/https URL，或项目代码/配置里 SITE_URL 是非占位域名，或 wrangler 配置里有
+// routes/custom_domain——任一命中都说明域名已经不是「待定项」了。
+const PLACEHOLDER_HOST_RE = /\b(example\.(com|org|net)|yourdomain\.[a-z]+|localhost|127\.0\.0\.1|workers\.dev)\b/i;
+const DOMAIN_SCAN_EXCLUDE_DIRS = new Set([
+  "node_modules",
+  ".git",
+  ".wrangler",
+  "dist",
+  "build",
+  ".output",
+  ".turbo",
+  ".rankup",
+]);
+const DOMAIN_SCAN_FILE_RE = /\.(mjs|js|jsx|ts|tsx|json|jsonc|toml|env|env\.example)$/i;
+const DOMAIN_SCAN_MAX_FILES = 3000;
+const DOMAIN_SCAN_MAX_DEPTH = 6;
+
+// 找 integrations.md / checks.md 里出现的非占位真实域名(https:// 开头,排除 example.*)。
+async function findRealDomainIn(rankupDir, filename) {
+  let text;
+  try {
+    text = await readFile(path.join(rankupDir, filename), "utf8");
+  } catch {
+    return null;
+  }
+  const matches = text.match(/https?:\/\/[a-z0-9][a-z0-9.-]*\.[a-z]{2,}[^\s|)\]"'>]*/gi) || [];
+  const real = matches.find((url) => !PLACEHOLDER_HOST_RE.test(url));
+  return real ?? null;
+}
+
+// 有界的项目文件扫描:找 SITE_URL 的非占位赋值,以及 wrangler 配置里的 routes/custom_domain。
+// 深度与文件数都设了上限——这是一次「有没有信号」的扫描,不是完整索引,大仓库不该被拖慢。
+async function scanProjectForDomainSignals(projectRoot) {
+  const signals = { siteUrl: null, wranglerRoute: null };
+  let scanned = 0;
+
+  async function walk(dir, depth) {
+    if (depth > DOMAIN_SCAN_MAX_DEPTH || scanned >= DOMAIN_SCAN_MAX_FILES) return;
+    let entries;
+    try {
+      entries = await readdir(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (scanned >= DOMAIN_SCAN_MAX_FILES) return;
+      if (entry.name.startsWith(".") && entry.name !== ".env") continue;
+      if (entry.isDirectory()) {
+        if (DOMAIN_SCAN_EXCLUDE_DIRS.has(entry.name)) continue;
+        await walk(path.join(dir, entry.name), depth + 1);
+        continue;
+      }
+      if (!DOMAIN_SCAN_FILE_RE.test(entry.name) && entry.name !== "wrangler.jsonc" && entry.name !== "wrangler.toml") {
+        continue;
+      }
+      scanned += 1;
+      let text;
+      try {
+        text = await readFile(path.join(dir, entry.name), "utf8");
+      } catch {
+        continue;
+      }
+      if (!signals.siteUrl) {
+        const m = text.match(/SITE_URL\s*[:=]\s*["'`](https?:\/\/[^"'`]+)["'`]/);
+        if (m && !PLACEHOLDER_HOST_RE.test(m[1])) signals.siteUrl = m[1];
+      }
+      if (!signals.wranglerRoute && /wrangler\.(jsonc|toml)$/i.test(entry.name)) {
+        if (/"routes"\s*:\s*\[\s*[^\]]*\S/.test(text) || /\broutes\s*=/.test(text)) {
+          signals.wranglerRoute = "routes";
+        } else if (/custom_domain\s*[:=]\s*true/i.test(text)) {
+          signals.wranglerRoute = "custom_domain";
+        }
+      }
+    }
+  }
+
+  await walk(projectRoot, 0);
+  return signals;
+}
+
+async function detectDomainFinalized(rankupDir, projectRoot) {
+  const signals = [];
+
+  const infraBytes = await fileBytes(path.join(rankupDir, "infrastructure.md"));
+  if (infraBytes >= 50) signals.push(`infrastructure.md 有内容（${infraBytes} 字节）`);
+
+  const fromIntegrations = await findRealDomainIn(rankupDir, "integrations.md");
+  if (fromIntegrations) signals.push(`integrations.md 出现正式域名 ${fromIntegrations}`);
+
+  const fromChecks = await findRealDomainIn(rankupDir, "checks.md");
+  if (fromChecks) signals.push(`checks.md 出现正式域名 ${fromChecks}`);
+
+  if (projectRoot) {
+    const projectSignals = await scanProjectForDomainSignals(projectRoot);
+    if (projectSignals.siteUrl) signals.push(`项目配置 SITE_URL=${projectSignals.siteUrl}`);
+    if (projectSignals.wranglerRoute) {
+      signals.push(`wrangler 配置含 ${projectSignals.wranglerRoute}`);
+    }
+  }
+
+  return { domainFinalized: signals.length > 0, signals };
+}
+
+async function checkLifecycle(rankupDir, projectRoot) {
   // 上线与否这里**猜不准，也不假装准**：只看有没有 infrastructure/integrations/agentic
   // 三个证据之一，据此决定要不要把「上线后」那组检查点纳进来。报告里会写明这是推断。
   const looksLive =
@@ -350,10 +457,12 @@ async function checkLifecycle(rankupDir) {
   }
 
   // 批 B（域名相关的接入）只在项目已经定稿域名时才要求——判断方式仿照上面 looksLive
-  // 的做法：不猜"是不是上线了"，只看 infrastructure.md 这份记录域名/zone/部署信息的
-  // 文件是不是已经有实质内容（阈值与 LIFECYCLE_CHECKS 里 "infrastructure" 那条一致），
-  // 没有就说明域名还没定稿，批 B 逐行检查在这个阶段全部跳过、不报错。
-  const domainFinalized = (await fileBytes(path.join(rankupDir, "infrastructure.md"))) >= 50;
+  // 的做法：不猜"是不是上线了"，而是多信号 OR 判定（见 detectDomainFinalized 的注释），
+  // 全部落空才说明域名还没定稿，批 B 逐行检查在这个阶段全部跳过、不报错。
+  const { domainFinalized, signals: domainFinalizedSignals } = await detectDomainFinalized(
+    rankupDir,
+    projectRoot,
+  );
 
   let integrationGaps = [];
   if (looksLive) {
@@ -369,7 +478,7 @@ async function checkLifecycle(rankupDir) {
     }
   }
 
-  return { checks: results, looksLive, domainFinalized, integrationGaps };
+  return { checks: results, looksLive, domainFinalized, domainFinalizedSignals, integrationGaps };
 }
 
 // 记录是否落后于代码:有提交而记忆没动,就是漂移信号。滞后指标不能当进度依据。
@@ -480,7 +589,7 @@ async function reviewProject(projectRoot, days) {
     }
   }
 
-  report.lifecycle = await checkLifecycle(rankupDir);
+  report.lifecycle = await checkLifecycle(rankupDir, projectRoot);
   report.commitsSince = await commitsSince(projectRoot, `${days} days ago`);
   return report;
 }
@@ -529,7 +638,8 @@ function renderText(report, days) {
   }
 
   // 生命周期检查点
-  const { checks: lcChecks, looksLive, integrationGaps, domainFinalized } = report.lifecycle;
+  const { checks: lcChecks, looksLive, integrationGaps, domainFinalized, domainFinalizedSignals } =
+    report.lifecycle;
   if (lcChecks.length > 0) {
     const missing = lcChecks.filter((c) => !c.done);
     const passed = lcChecks.filter((c) => c.done);
@@ -589,6 +699,9 @@ function renderText(report, days) {
       `## 接入看板逐行核对（批 A${domainFinalized ? " + 批 B" : "，批 B 待域名定稿后再查"}）`,
       "",
     );
+    if (domainFinalized) {
+      lines.push(`域名定稿判据：${domainFinalizedSignals.join("；")}`, "");
+    }
     if (integrationGaps.length === 0) {
       lines.push(
         "✓ 批 A" +

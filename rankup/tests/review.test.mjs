@@ -211,6 +211,31 @@ test("标 ✅ 但证据列是空的被判为弱证据，不是通过", async () 
   });
 });
 
+// 回归:一个早已上线、域名早已定稿的项目从来没建过 infrastructure.md(旧版
+// domainFinalized 只看这一个文件,于是批 B 整段被静默跳过、零报警)。
+// integrations.md 里出现的正式域名本身就应该足以判定域名已定稿。
+test("没有 infrastructure.md 但 integrations.md 出现正式域名时，批 B 仍被检查", async () => {
+  await withProject(async (root) => {
+    const rows = FULL_INTEGRATIONS_TABLE.split("\n").filter(
+      (line) => !line.includes("Yandex Webmaster"),
+    );
+    await seed(root, {
+      "integrations.md": [
+        "站点：https://example-live.com",
+        ...rows,
+      ].join("\n"),
+    });
+    const report = JSON.parse(runReview(root, ["--json"]).stdout);
+    assert.equal(report.lifecycle.domainFinalized, true);
+    assert.ok(
+      report.lifecycle.domainFinalizedSignals.some((s) => s.includes("example-live.com")),
+      "判据里应该点名找到的那个域名",
+    );
+    const ids = report.lifecycle.integrationGaps.map((gap) => gap.id);
+    assert.ok(ids.includes("yandex"), "批 B 的 Yandex 缺口应该被查出来,而不是因为没有 infrastructure.md 就跳过整批");
+  });
+});
+
 test("域名未定稿（没有 infrastructure.md）时批 B 不报错，只查批 A", async () => {
   await withProject(async (root) => {
     await seed(root, {
