@@ -157,6 +157,22 @@ meta 标签的形状（token 是公开值，本来就印在每一页的 HTML 里
 { name: "yandex-verification", content: YANDEX_VERIFICATION }  // Yandex
 ```
 
+### 尚无脚本的缺口（2026-09-13 登记）
+
+Naver（`naver-setup.mjs`）与 Yandex（`yandex-setup.mjs`）都已经把「添加站点 →
+取验证值 → 点验证」固化成脚本，**GSC 与 Bing 这两步目前还没有对应脚本**：
+
+- **GSC 资源创建 + 所有权验证**：目前只能手动在 Search Console 后台「添加资源」
+  选「网域」、切到「任何 DNS 提供商」拿 TXT 值，由 API 写 DNS，再让用户点验证。
+- **Bing Webmaster 添加站点 + 所有权验证**：同理，手动在后台加站点、切到 HTML
+  meta 验证拿 token，写代码部署后由用户点验证。
+
+`webmaster-sitemap.mjs` 已经覆盖了这两家**验证通过之后**的 sitemap 状态查询与
+提交，缺口只在「加站点 + 拿验证值 + 点验证」这一段。下次实际接入 GSC/Bing 时，
+按本 Skill「可复用操作必须落成脚本」的规则，参照 `yandex-setup.mjs` 的结构
+（`status`/`add-site`/`verify` 三个子命令、DOM 取值不截图、点击竞态用
+「点击→网络请求判据→重试」模式）跑通后固化，不要每次重新手工摸索。
+
 ### 步骤 5：Naver Search Advisor（仅韩国市场）
 
 **什么时候需要这一步：项目有韩文版（`/ko` 或 `.kr` 域名）才做。** 不做韩国市场可以跳过。

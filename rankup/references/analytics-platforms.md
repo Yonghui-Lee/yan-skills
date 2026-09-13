@@ -63,6 +63,15 @@ GA4 在批 A：媒体资源的数据流 URL 只是展示用途，换域名不用
 Firebase 项目可以关联这个 GA4 媒体资源（下一节），但纯 Web 站不需要为了 GA4 先建 Firebase；
 先接 GA4，Firebase 只在要用它的 SDK 功能时再建。
 
+### 尚无脚本的缺口（2026-09-13 登记）
+
+**GA4 建媒体资源 + 数据流目前没有脚本**，`clarity-setup.mjs`/`ahrefs-setup.mjs`
+那种「打开控制台 → 找到入口 → 填表 → 抠 ID」的自动化流程还没有对应实现，接入
+步骤 1–3 仍然是手动在 GA 控制台操作。下次实际接入 GA4 时，按本 Skill「可复用
+操作必须落成脚本」的规则，参照 `clarity-setup.mjs`（`status`/`create` 两个
+子命令、双证人取证、URL 命中不等于创建成功）跑通后固化成 `ga4-setup.mjs`，
+不要每次重新手工摸索。
+
 ## CF WA（Cloudflare Web Analytics，域名无关，可在预览域先接）
 
 ### auto_install 默认必须关闭

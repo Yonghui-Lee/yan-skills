@@ -203,7 +203,7 @@
 | 检查项 | 客观通过条件 | 证据落点 | 怎么做 | 复查 |
 |---|---|---|---|---|
 | **批 A 在预览域接好并验证** | Cloudflare Web Analytics、GA4、Clarity 三个都有资源 ID 与「数据流状态条 / 互不相同的国家设备来源」两类证据；**先接的是不需要第三方账号的那个** | `.rankup/integrations.md` | `cf-analytics-setup.mjs`；GA4 与 Clarity 接入步骤见 [`analytics-platforms.md`](analytics-platforms.md) | 一次 |
-| 分析通道在采集 | **线上原始 HTML 里 grep 得到 beacon**。控制台显示「已启用」不算；beacon 注入方式按运行时选过，没有默认自动注入 | `.rankup/integrations.md` | `cf-analytics-setup.mjs status <domain>` | 每轮 |
+| 分析通道在采集 | **线上原始 HTML 里 grep 得到 beacon**。控制台显示「已启用」不算；beacon 注入方式按运行时选过，没有默认自动注入；grep 只证明代码在，**延迟加载器是否真的按设计触发**（不交互 6s 兜底 / 首次交互立即触发）另跑 `analytics-beacon-check.mjs` 验证 | `.rankup/integrations.md` | `cf-analytics-setup.mjs status <domain>`；`analytics-beacon-check.mjs <url> --both` | 每轮 |
 | **域名黑历史裁决** | 每个候选域名四项都有带日期的证据：`seo-webcafe.mjs history`（前世）、Wayback 快照、外链画像（`seo-webcafe.mjs backlink` 或 Ahrefs）、Google `site:` 与品牌名搜索；**成人 / 赌博 / 药 / 被惩罚 / 大量垃圾外链任一命中即否决**，否决的连证据一起记；通过且有前世的标 `has_history: true` | `.rankup/decisions.md` | 做法见 [`lifecycle.md`](lifecycle.md) 段 5 · 5.2。定稿前必查，**不允许「外链多但先用着」** | 会过期 |
 | zone 与 NS 用真实解析核验 | `whois` 的真实返回或 zone `active`，**不是「已告知用户改 NS」就结项**；NS 值交给用户自己改，没有代劳；域名没有代买 | `.rankup/infrastructure.md` | `whois -h <注册局 whois> <域名>`；路径见 [`cloudflare-stack.md`](cloudflare-stack.md) §8.5 | 一次 |
 | DNSSEC 先关后开 | 换 NS 前 `whois` 复查到 `unsigned`；zone active 后用 Cloudflare 的 DS 重新启用 | `.rankup/infrastructure.md` | [`cloudflare-stack.md`](cloudflare-stack.md)「换 NS 之前必须先关 DNSSEC」 | 一次 |
