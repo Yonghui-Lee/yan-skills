@@ -82,6 +82,18 @@ test('负载里没有工具列表：仍返回 error，调用方据此留现场',
   assert.match(runExtract(undefined).error, /no __NUXT__/);
 });
 
+test('回退不把分类列表当工具：只有 handle+name、没有访问量字段的数组不算', () => {
+  // /most-saved、/most-used 实测负载里有 category_group_list（handle+name，无 month_visited_count）。
+  // 工具列表若也丢了 website，必须报错留现场，而不是以 ok 吐出 22 个分类。
+  const res = runExtract({
+    data: [{
+      toolsList: [{ handle: 'foo', name: 'Foo', description: 'no website, no visits' }],
+      category_group_list: [{ handle: 'text-writing', name: 'Text&Writing' }],
+    }],
+  });
+  assert.match(res.error, /找不到工具列表/);
+});
+
 test('翻页：next_page_url=null 或已覆盖 total 就停；重复页按 handle 去重', () => {
   const res = runExtract(trendingPayload);
   assert.equal(boards.toolifyHasMorePages(res), false);

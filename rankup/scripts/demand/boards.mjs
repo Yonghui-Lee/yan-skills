@@ -551,11 +551,13 @@ export const TOOLIFY_EXTRACT = `(()=>{
   const prefer = ["toolsList","tableData","list","data","items"];
   const keys = [...prefer, ...Object.keys(d).filter(k=>!prefer.includes(k))];
   const listWhere = ok => keys.find(k=>Array.isArray(d[k]) && d[k].length && d[k][0] && ok(d[k][0]));
-  // 先找带 website 的列表；找不到再退到「像工具条目」的列表（有 handle + name）。
+  // 先找带 website 的列表；找不到再退到「像工具条目」的列表（handle + name + 访问量字段）。
   // /Best-trending-AI-Tools 的 tableData 行只有 handle/name/访问量/增长，没有 website
   // （2026-09-13 实测，DOM 里也只有 /tool/<handle> 站内链接），外链域名要靠 --resolve-domains。
-  const key = listWhere(t=>t.website) || listWhere(t=>t.handle && t.name);
-  if(!key) return {error:"payload 里找不到工具列表（既没有带 website 的，也没有带 handle+name 的），页面结构可能改了"};
+  // 回退必须要求 month_visited_count：/most-saved、/most-used 负载里的 category_group_list
+  // 也有 handle+name，只认这两个会把分类当工具、以 ok 状态吐出来，绕过失败留现场。
+  const key = listWhere(t=>t.website) || listWhere(t=>t.handle && t.name && Object.prototype.hasOwnProperty.call(t,"month_visited_count"));
+  if(!key) return {error:"payload 里找不到工具列表（既没有带 website 的，也没有带 handle+name+month_visited_count 的），页面结构可能改了"};
   // 「Payment Platform」优先从负载里的 t.payment_platform 数组取（2026-08-23 实测
   // 这个字段确实存在，早期版本误判为「只在 DOM 里」）。渲染出来的表格作为兜底，
   // 万一字段被改名还能救回来。social_media_site_id 是内部枚举，不可靠，别用。
