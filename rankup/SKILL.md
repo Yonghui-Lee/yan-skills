@@ -43,7 +43,7 @@ metadata:
 | 「这个域名能不能用」「域名前世」「域名黑历史」 | 5 | `lifecycle.md` 段 5 黑历史闸门 + [`seo-webcafe.md`](references/seo-webcafe.md) `history` |
 | 「域名买完了」「帮我绑域名」「这个域名绑一下」 | 5 | `cloudflare-stack.md` §8.5「域名绑定到 Workers（全 API，零界面操作）」：添加 zone → 绑 Workers 自定义域名 → 设 SITE_URL → 告知 NS → 等激活 → 放开索引 |
 | 「数据检测平台都接入了吗」「GSC 接了没」「提交 sitemap」「怎么一直不收录」 | 5 | [`search-platforms.md`](references/search-platforms.md)、[`analytics-platforms.md`](references/analytics-platforms.md) |
-| 「把 Ahrefs 的检验结果都修了」「全站内链失效」「重定向链」 | 5→4 | `scripts/ahrefs-site-audit.mjs` 取清单，修完按段 4 全套重跑 |
+| 「把 Ahrefs 的检验结果都修了」「全站内链失效」「重定向链」 | 5→4 | `scripts/ahrefs-site-audit.mjs` 取清单，`scripts/ahrefs-issues-recheck.mjs <导出的issues.json>` 线上复核哪些已经不存在、哪些仍存在、哪些需要浏览器或 PSI 判（报告常滞后于最近部署，别假设报告永远反映当前状态），修完按段 4 全套重跑 |
 | 「帮我搞点外链」「去哪发外链」「竞品的外链哪来的」「这些外链有没有毒」 | 6 | `backlink` Skill + [`webcafe-topics.md`](references/experiences/webcafe-topics.md) 五 |
 | 「发个 Product Hunt」「上架发布平台」 | 6 | [`product-launch.md`](references/product-launch.md) |
 | 「访客不注册」「没人付费」「定价怎么定」「接 PayPal」「AdSense 被拒」 | 7 | [`monetization.md`](references/monetization.md)、[`conversion.md`](references/experiences/conversion.md) |
