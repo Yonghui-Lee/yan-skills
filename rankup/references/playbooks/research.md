@@ -258,6 +258,19 @@ Semrush / Similarweb / seo.web.cafe 这些面板给的月量，是**过去 28–
 面板回答「过去一个月有多少人搜」，社区回答「这两周有没有大量人在讨论」。两条腿都跑完才允许下结论。
 只跑面板，会系统性地错过所有新起的词——而新起的词恰恰是新站唯一能抢到的。
 
+### 否决前必须反查：只看种子词判「不做」是禁止的
+
+> 阶段 4 的「月量太低 → 否」不能只用词根与种子词自己的量下判断。任何方向在被判「不做」之前，
+> 必须先跑一次反查双腿：**站找词**——找 6–10 个同类站，用 Similarweb（总流量、搜索占比）与
+> Semrush organic positions（真实排位词、KD、流量占比）汇出这个赛道真正带流量的词清单，标出
+> 免费小工具词与内容长尾词；**词找站**——把汇出的前 15 个词反查 SERP 前十是谁、各站流量、是否
+> 小团队，找 KD 低且被小站占着的词。搜索占比明显偏低（<30%）的站说明主要靠社媒/直接流量，SEO
+> 这条路走不通；赛道真实盘子是反查汇出的长尾词总和，不是种子词之和。
+
+| 硬规则 | 为什么 |
+|---|---|
+| P2 阶段 4 判「量太少、不做」前必须先完成站找词 + 词找站反查双腿，不许只凭词根/种子词自己的量下结论 | 【实测】站找词/词找站对照实验：同一方向，种子词法与反查法估出的盘子可以相差一个数量级以上，差异全在具体平台 + 具体场景的长尾词；也有方向反查后仍然小，说明反查能同时防止误杀与误留 |
+
 ### 流水线
 
 **顺序固定：先搜（阶段 1），再扩（阶段 2），再取量（阶段 3）。** 反过来先取量再看 SERP，
@@ -372,7 +385,7 @@ Semrush / Similarweb / seo.web.cafe 这些面板给的月量，是**过去 28–
 | **2 · 域名画像** | 并行 F | `node $RANKUP/scripts/demand/aitdk-lookup.mjs <域名>` | 注册日期 / 站龄 / 月访问 / 流量结构 / DR / 环比 / 核心搜索词 | `✗ HTTP 429/403` = 被挡，不是没数据 |
 | **3 · 站群反查** | 并行 F | `node $RANKUP/scripts/demand/site-network.mjs --domain <域名> --confirm --max 25 --json --out net.json` | 同一主体运营的其它站 + 共同指纹 + 回访状态 | 脚本**只记事实不裁定强弱**。`revisit=fetch_failed` = 这次没看到，不是不共享指纹。**「无共同指纹」是站群的常态**（各站独立 GA4 / 埋点进 GTM 容器 / 服务端埋点），空结果读成「这条路没找到」 |
 | **4 · 广告与供给侧** | 并行 F | `node $RANKUP/scripts/demand/ads-transparency.mjs creatives --domain <域名> --region US`<br>`node $RANKUP/scripts/demand/sitemap-diff.mjs --domain <域名> --all --slug-words --top-words 40` | 他在不在持续买流量（持续投放 = ROI > 1）；他用几页吃了多少词 | ads-transparency 不需要 token 不需要登录。**广告数值不准，趋势与量级对**（50K 真值 40K–60K），**不进任何财务测算** |
-| **5 · 面板真实流量** | **串行 · 独占面板**（铁律三） | 一个 agent，一个会话，顺序跑完：<br>`node $BACKLINK/scripts/similarweb-query.mjs --domain <d> --report performance`<br>`--report channels` / `--report similar-sites` / `--report audience-geo` / `--report site-keywords`<br>**`node $BACKLINK/scripts/semrush-traffic.mjs --domain <d>`** ← 这一条是口径对齐的关键<br>`node $BACKLINK/scripts/semrush-overview.mjs --domain <d> --db <目标国>`<br>`node $BACKLINK/scripts/semrush-report.mjs --report organic-positions --domain <d> --db <目标国>`<br>`--report organic-pages` / `--report backlinks-overview` | 总访问 + 渠道构成 + 相似站 + 地理分布 + 站点词 / **Semrush 侧的总访问量口径（.Trends）** / 单国家库自然流量 + 排名词 + 主要页面 + 反链 | **两家「差三倍」多半是拿错了数**：`semrush-overview` 给的是**自然搜索**估算，Similarweb 给的是**总访问**，本来就不同量级。要并排就用 `semrush-traffic.mjs` 的 .Trends 总访问——2026-08-28 实测某大站两家差 2.4%。（该脚本 `--window` 默认 **foreground**，全仓唯一例外：这张报表在后台标签页里不水合。）<br>**只有 performance 报表有结构化 metrics**——在渠道页上跑 deriveMetrics 会把筛选器文字当数值抓（实测 globalRank 抓成 1）。<br>`organic-pages` 从 URL 后方读当前行（旧版向前读会整体错位）。<br>**一次装一堆**：同一个面板窗口跑完所有域名再 close |
+| **5 · 面板真实流量** | **串行 · 独占面板**（铁律三） | 一个 agent，一个会话，顺序跑完：<br>`node $BACKLINK/scripts/similarweb-query.mjs --domain <d> --report performance`<br>`--report channels` / `--report similar-sites` / `--report audience-geo` / `--report site-keywords`<br>**`node $BACKLINK/scripts/semrush-traffic.mjs --domain <d>`** ← 这一条是口径对齐的关键<br>`node $BACKLINK/scripts/semrush-overview.mjs --domain <d> --db <目标国>`<br>`node $BACKLINK/scripts/semrush-report.mjs --report organic-positions --domain <d> --db <目标国>`<br>`--report organic-pages` / `--report backlinks-overview` | 总访问 + 渠道构成（`channels` 报表里的搜索流量占比——判断该站是否靠自然搜索获客） + 相似站 + 地理分布 + 站点词 / **Semrush 侧的总访问量口径（.Trends）** / 单国家库自然流量 + 排名词 + 主要页面 + 反链 | **两家「差三倍」多半是拿错了数**：`semrush-overview` 给的是**自然搜索**估算，Similarweb 给的是**总访问**，本来就不同量级。要并排就用 `semrush-traffic.mjs` 的 .Trends 总访问——2026-08-28 实测某大站两家差 2.4%。（该脚本 `--window` 默认 **foreground**，全仓唯一例外：这张报表在后台标签页里不水合。）<br>**只有 performance 报表有结构化 metrics**——在渠道页上跑 deriveMetrics 会把筛选器文字当数值抓（实测 globalRank 抓成 1）。<br>`organic-pages` 从 URL 后方读当前行（旧版向前读会整体错位）。<br>**一次装一堆**：同一个面板窗口跑完所有域名再 close。**批量对 6–10 个同类站跑这套 `channels`（搜索占比）+ `organic-positions`（排位词）组合，就是 P2 阶段 4 否决前必须完成的站找词 + 词找站反查（见前文「否决前必须反查」）** |
 | **6 · 薄编排复核**（帖子声称数字时） | 串行，在 5 之后 | `node $RANKUP/scripts/demand/revenue-site-audit.mjs --domain <域名> --source-url <帖子链接> --claimed-visits <n> --claimed-organic-share <pct> --claimed-mrr <n> --keyword <主词> --db <目标国> --out audit.json` | 各源原始对照数据 + 倍差事实，**不含 verdict** | 它顺序调用现有 AITDK / Similarweb 两张报表 / Semrush / sitemap / KD 脚本。`--from <目录>` 可离线重整已保存的原始文件（**不重跑不再花配额**）。原始文件全保留在输出的 `rawFilesDir` |
 | **7 · 定性背景**（可选，判断「他为什么能起来」） | 并行，与 5/6 无冲突 | `/deep-research` 或 `/agent-reach`：查这个品牌/产品在 Reddit / X / 小红书 / 播客里的讨论<br>`node $RANKUP/scripts/webcafe-forum.mjs chat-search "<品牌或赛道>"` | 叙事与打法（社群里有没有人拆过它） | **这一步只出定性叙事，不出任何数字**。哥飞社区那条**优先于问 AI**：`chat-search` 拿的是群聊归档原文，不经模型转述、零 AI 额度。**匿名不报错，只把正文抹成空串** |
 | 8 | 串行 | 他排的头部词当**词根**进 [P2](#p2--词根调研这个词能不能做扩成树)，看这棵树自己能不能进 | 立项 / 否决 | — |

@@ -98,6 +98,7 @@
 | SERP 快照是当天的 | 每个词的 SERP 构成带日期；写了「窗口在关闭」的词另带一个不超过一个月的复测日期 | `.rankup/keywords.md` | 拉一次真实 top10。**先读 [`seo-growth.md`](seo-growth.md) 的 `google.com/goto` 一节**——二手 SERP 通道会降级但照样 200，盘面「突然空了」先怀疑通道 | 会过期 |
 | **月量已用 Trends 锚点交叉验证** | 每个候选词的月量都有 Trends 锚点折算值与相对 Semrush/Similarweb 的偏差倍数，或明确标注「Trends 无法分辨」（12 个月多数月份指数为 0）——**没有这两种状态之一的候选词不许进裁决** | `.rankup/keywords.md` | `playbooks/research.md` P2 阶段 3 的锚点交叉验证步骤；判据与折算表见 [`trends.md`](trends.md)「〇·六」 | 会过期 |
 | **词表已反查竞品补第二轮** | 自己扩的词池与 **3–5 个同赛道、站龄 9–24 个月竞品的实际排名词库**（每站前 100 词）做过差集，差集里的词逐个补测了量与难度。**被自己判过「太难」的头词也测了**。补漏后**重算了按量加权的 CPC** | `.rankup/keywords.md` | `backlink/scripts/semrush-report.mjs` 取排名词报表；规则见 [`demand-sources.md`](demand-sources.md) 九·六 | 一次 |
+| **候选被判不做前已完成站找词 + 词找站反查** | 每个被判「量太少、不做」的候选，裁决前已跑过站找词（同类站用 Similarweb 搜索占比 + Semrush organic positions 汇出真实带量词清单）与词找站（反查该词清单的 SERP 归属）双腿；只凭词根/种子词自己的量下「不做」不算过 | `.rankup/research/<词根>-<date>.md` | 见 [`playbooks/research.md`](playbooks/research.md) P2「否决前必须反查」+ P4 阶段 5 反查动作 | 会过期 |
 | **排上去值不值已折成钱** | 同赛道竞品的**真实流量**（面板，不是关键词模型）已取到并折成收入区间，与词池的模型上界并排写出。**面板与模型的倍差有归因**，不是只写「口径不同」。竞品低于面板收录门槛的，如实记为「无可观测流量」 | `.rankup/roadmap.md`（进立项前置条件）与 `.rankup/decisions.md` | `similarweb-query.mjs` + `semrush-overview.mjs` 取数，`seo-webcafe.mjs money` 折算；**判断读 [`demand-sources.md`](demand-sources.md) 十·五与 ②·六·四**——单个大头词以 #5–#10 撑起竞品过半模型流量时，模型高估 4–13 倍，以面板为准 | 会过期 |
 | 量化的继续/停止标准 | `roadmap.md` 有阶段目标与放弃条件，且放弃条件是可判定的数字或事实，不是「效果不好就停」 | `.rankup/roadmap.md` | 判据取自 [`zero-to-one.md`](experiences/zero-to-one.md) 的止损线一节 | 一次 |
 
