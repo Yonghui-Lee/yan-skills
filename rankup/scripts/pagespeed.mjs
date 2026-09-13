@@ -134,9 +134,21 @@
  * `.rankup/baseline.md`，留空会在下一轮被读成「查过了，没问题」。
  *
  * 用法：
+ *   **要实际拿分数，用 collect——这才是应该走的默认路径**：opencli 驱动本机
+ *   真实可见的 Chrome，报告出分后直接抠完整 LHR JSON 落盘，2026-09-12 起已
+ *   自动处理「标签页真前台可见」这个刚需，可无人值守稳定出分（细节见文件头
+ *   2026-09-12 各段实测）。`plan` 只打印链接、不采数，是 collect 的**兜底**：
+ *   拿到链接后必须在一个真实前台可见的浏览器标签页里手动打开，隐藏面板、
+ *   无显示环境打开会卡在「Running analysis」永远不出分——这不是脚本的 bug，
+ *   是 pagespeed.web.dev 网页版本身的限制（同源标签页必须真实可见渲染才会
+ *   跑完分析）。只在这台机器没有 opencli、非 macOS、或 Chrome 前台被更强
+ *   抢占导致 collect 持续报 tab-hidden 时，才退化用 plan。
+ *
  *   node pagespeed.mjs plan <url...> [--strategy mobile|desktop|both] [--hl en]
  *       打印要在浏览器里打开的 pagespeed.web.dev 链接、读数清单、baseline.md 记法。
- *       零依赖，任何环境都能跑。**这是默认子命令。**
+ *       零依赖，任何环境都能跑，但不采数（见上方选择建议）。命令行不传子命令时
+ *       参数解析缺省到这里（`parseArgs` 里 `cmd || "plan"`），这只是解析缺省值，
+ *       不代表 plan 是推荐路径。
  *   node pagespeed.mjs collect <url...> [--strategy both] [--budget 300]
  *       [--session NAME] [--out DIR] [--sleep 5] [--no-foreground]
  *       用 opencli 驱动本机 Chrome，报告出分后**直接抠完整 LHR JSON**（见上方
@@ -230,22 +242,33 @@ function strategies(s) {
 
 const HELP = `PageSpeed 取数（走网页版 pagespeed.web.dev，**不需要 key、不占配额**）
 
-  node pagespeed.mjs plan <url...>    [--strategy mobile|desktop|both] [--hl en]
+要拿分数用 collect——它是应该走的默认路径（opencli 驱动真实可见的本机 Chrome，
+直接落盘完整 LHR JSON，2026-09-12 起自动处理前台可见性，可无人值守稳定出分）。
+plan 只打印链接、不采数，是没有 opencli / 非 macOS / Chrome 前台被抢占时的
+兜底：把链接贴进一个真实前台可见的浏览器标签页才会出分，隐藏面板或无显示
+环境打开会卡在「Running analysis」永远出不了分——这是 pagespeed.web.dev 网页版
+本身的限制，不是这个脚本的 bug。
+
   node pagespeed.mjs collect <url...> [--strategy both] [--hl en] [--budget 300]
       [--session NAME] [--out DIR] [--sleep 5] [--no-foreground]
+  node pagespeed.mjs plan <url...>    [--strategy mobile|desktop|both] [--hl en]
 
 示例（把 <url> 换成你真正要测的站，不要对不属于自己的第三方域名跑 collect）：
-  node pagespeed.mjs plan <url> --strategy both
   node pagespeed.mjs collect <url> --strategy both --out .rankup/evidence/pagespeed-dev
+  node pagespeed.mjs plan <url> --strategy both
 
-plan（默认）  打印要在浏览器里打开的链接 + 读数清单 + baseline.md 记法。零依赖。
-collect       用 opencli 驱动本机 Chrome，报告出分后直接抠完整 Lighthouse
-              LHR JSON（不再依赖展开「展开视图」界面），每个 (URL × 端) 落
-              lhr.json + summary.json + summary.md + 截图/页面文本双证人，
+collect       默认路径，真正采数。用 opencli 驱动本机 Chrome，报告出分后直接抠完整
+              Lighthouse LHR JSON（不再依赖展开「展开视图」界面），每个 (URL × 端)
+              落 lhr.json + summary.json + summary.md + 截图/页面文本双证人，
               --strategy both 时移动端/桌面端分两次单独打开分析（各自的
               active tab 对应各自的 form_factor），另外落一份
               <url>.combined-summary.md 把两端指标并排对照，
               默认目录 .rankup/evidence/pagespeed-<ts>/。
+plan          兜底方案，只打印要在浏览器里打开的链接 + 读数清单 + baseline.md 记法，
+              不采数、零依赖。命令行不传子命令时参数解析缺省落到这里
+              （parseArgs 里 cmd || "plan"），这只是解析缺省值，不代表 plan
+              是推荐路径——链接必须在真实前台可见的浏览器标签页里打开，否则
+              卡在「Running analysis」出不了分。
 
 选项：
   --strategy      mobile / desktop / both。plan 默认 mobile，collect 默认 both

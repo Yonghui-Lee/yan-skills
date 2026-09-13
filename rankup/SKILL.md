@@ -39,7 +39,7 @@ metadata:
 | 「做个好看的页面」「有没有什么好的设计参考」「Hero 怎么设计」「找个组件参考」「landing page 怎么排」「有什么动画效果」「页面设计灵感」 | 3 | 先浏览 [`design-references.md`](references/design-references.md) 收录站的相关分类，选 2–3 个案例参考后再实现；基础控件仍走 shadcn 组件库红线 |
 | 「写一下这页的文案」「这稿子 AI 味太重」「帮我改稿」「语言结构理顺一点」「怎么写才会被 AI 引用」 | 4 | 中文：`/write`（先确认它的五个附属 Skill 都在，缺的用 `find-skills` 装齐；装不上才退到 `/human-writing` 起稿 → `/shuorenhua` 去 AI 味，见 [`skill-ecosystem.md`](references/skill-ecosystem.md)）；内容形状按 `/ai-seo` 的 content-patterns；JSON-LD 只取 `/seo-geo` 的模板 |
 | 「文案怎么写才有人点」「定价页怎么排」「用户为什么不买」「还有什么渠道能推」 | 7 | `/marketing-psychology`（锚定、社会认同、损失厌恶等用在页面与定价上）+ `/marketing-ideas`（渠道清单）；判据仍以 [`conversion.md`](references/experiences/conversion.md) 为准 |
-| 「站慢不慢」「跑个性能」「Core Web Vitals」 | 4 | `seo-box.md` 一，`scripts/pagespeed.mjs plan --strategy both` |
+| 「站慢不慢」「跑个性能」「Core Web Vitals」 | 4 | `seo-box.md` 一，`scripts/pagespeed.mjs collect --strategy both`（`plan` 只打印链接不采数，仅兜底） |
 | 「这个域名能不能用」「域名前世」「域名黑历史」 | 5 | `lifecycle.md` 段 5 黑历史闸门 + [`seo-webcafe.md`](references/seo-webcafe.md) `history` |
 | 「域名买完了」「帮我绑域名」「这个域名绑一下」 | 5 | `cloudflare-stack.md` §8.5「域名绑定到 Workers（全 API，零界面操作）」：添加 zone → 绑 Workers 自定义域名 → 设 SITE_URL → 告知 NS → 等激活 → 放开索引 |
 | 「数据检测平台都接入了吗」「GSC 接了没」「提交 sitemap」「怎么一直不收录」 | 5 | [`search-platforms.md`](references/search-platforms.md)、[`analytics-platforms.md`](references/analytics-platforms.md) |
@@ -130,7 +130,7 @@ Day-1 清单里最容易漏、也最贵的三条单列在这里，其余见 `lif
 ### 4 上线前 SEO / GEO
 
 - **触发**：「能不能上线了」「TDK」「密度」「怎么被 AI 引用」「站慢不慢」。
-- **入口**：[`lifecycle.md`](references/lifecycle.md) 段 4；判读 [`seo-box.md`](references/seo-box.md)、[`seo-webcafe.md`](references/seo-webcafe.md)、[`seo-growth.md`](references/seo-growth.md) 三-B。常用：`scripts/seo-audit.mjs --sitemap`、`scripts/pagespeed.mjs plan --strategy both`、`scripts/is-agentic.mjs scan --save`、`seo-webcafe.mjs audit` / `chat`。写文案的兄弟 Skill：中文 `/write`（先确认它的五个附属 Skill 都在，缺的用 `find-skills` 装齐；装不上才退到 `/human-writing` 起稿 + `/shuorenhua` 去 AI 味）；被 AI 引用的内容形状读 `/ai-seo` 的 content-patterns；JSON-LD 模板只读 `/seo-geo` 的 schema-templates，不跑它的脚本；配图 `/imagegen`。分工与加载条件见 [`skill-ecosystem.md`](references/skill-ecosystem.md)。
+- **入口**：[`lifecycle.md`](references/lifecycle.md) 段 4；判读 [`seo-box.md`](references/seo-box.md)、[`seo-webcafe.md`](references/seo-webcafe.md)、[`seo-growth.md`](references/seo-growth.md) 三-B。常用：`scripts/seo-audit.mjs --sitemap`、`scripts/pagespeed.mjs collect --strategy both`（`plan` 只打印链接不采数，仅兜底）、`scripts/is-agentic.mjs scan --save`、`seo-webcafe.mjs audit` / `chat`。写文案的兄弟 Skill：中文 `/write`（先确认它的五个附属 Skill 都在，缺的用 `find-skills` 装齐；装不上才退到 `/human-writing` 起稿 + `/shuorenhua` 去 AI 味）；被 AI 引用的内容形状读 `/ai-seo` 的 content-patterns；JSON-LD 模板只读 `/seo-geo` 的 schema-templates，不跑它的脚本；配图 `/imagegen`。分工与加载条件见 [`skill-ecosystem.md`](references/skill-ecosystem.md)。
 
 | 硬规则 | 为什么 |
 |---|---|

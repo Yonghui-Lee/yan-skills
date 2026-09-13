@@ -278,7 +278,7 @@ Skill 集合不一样，文档只保证「该用什么」；遇缺就跳过会�
 | 把 IndexNow 推送写成「文档里的一条命令」交给人记 | 焊进项目自己的 `ship` 命令（第九节） | 漏推不会让任何东西变红 |
 | 用 Claude in Chrome 逐个点 GSC 移除工具 | `gsc-remove-urls.mjs` | 6 个 URL 要点 30+ 次且按钮位置漂移 |
 | Cloudflare Web Analytics 手嵌 beacon 时把 `site_tag` 填进 `token` | `token` 必须是 `site_token`；接完用 GraphQL `rumPageloadEventsAdaptiveGroups(filter:{siteTag})` 查 `count > 0` | 两者同形（32 位 hex），填错不报错、脚本照样 200，只是永远 0 数据——一个站这样空跑了 45 天 |
-| Lighthouse 单跑当性能基线 | `pagespeed.mjs plan --strategy both` 出链接后读网页版 | 单跑只有实验室一半；现场那块不存在 = CrUX 流量不足，不是 0、不等于通过 |
+| Lighthouse 单跑当性能基线 | `pagespeed.mjs collect --strategy both` 直接落 LHR JSON | 单跑只有实验室一半；现场那块不存在 = CrUX 流量不足，不是 0、不等于通过 |
 | 页面有占位链接 / 占位文案 / 占位图片就上线 | 上线前全站扫一遍，占位一律清掉或整块删掉 | Google 会把它判成垃圾站，是段 3 的红线 |
 | 文案里手打由构建脚本生成的数字（兼容条数、目录规模、扫描总数） | 组件从生成的 JSON 注入，文案留槽位 | 实测同一个站同时挂着三套数字：每次重建目录数字就漂，而文案不会跟着变 |
 | 并行 sub agent 在共享 scratchpad 里用 `dump.json` / `edit.py` 这类无前缀文件名 | 文件名带自己的页面 slug 前缀 | 实测一个 agent 的中间产物被兄弟 agent 覆盖，脚本读到别人的数据且不报错 |

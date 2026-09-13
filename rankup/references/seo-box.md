@@ -208,12 +208,16 @@ bash <rankup-skill-dir>/scripts/aitdk-opencli.sh <url> [session-name] [output.js
 （「许多样本 / 少量样本」）和新的**「智能体浏览」类别**——API 都不返回。
 
 ```bash
-# 出链接与读数清单（零依赖，随时能跑；把 <url> 换成自己要测的站）
-node <rankup-skill-dir>/scripts/pagespeed.mjs plan <url> <url2> <url3> --strategy both
+# 默认路径：驱动本机 Chrome 采数，报告出分后直接抠完整 Lighthouse LHR JSON 落盘，
+# 不需要人工打开网页、不再靠人肉点开「展开视图」——见下方「LHR 直抠」一节
+# （2026-09-12 起 opencli 自动把标签页拉到真实前台可见，可无人值守稳定出分）
+node <rankup-skill-dir>/scripts/pagespeed.mjs collect <url> <url2> <url3> --strategy both
 
-# 驱动本机 Chrome 采数：报告出分后直接抠完整 Lighthouse LHR JSON 落盘，
-# 不再靠人肉点开「展开视图」——见下方「LHR 直抠」一节
-node <rankup-skill-dir>/scripts/pagespeed.mjs collect <同样几个 url> --strategy both
+# 兜底：只出链接与读数清单，不采数（零依赖，随时能跑；把 <url> 换成自己要测的站）。
+# 拿到链接后必须在真实前台可见的浏览器标签页里打开，隐藏面板/无显示环境打开会卡在
+# 「Running analysis」永远不出分——仅在这台机器没有 opencli、非 macOS、或 Chrome
+# 前台被更强抢占导致 collect 持续报 tab-hidden 时才用
+node <rankup-skill-dir>/scripts/pagespeed.mjs plan <同样几个 url> --strategy both
 ```
 
 四条必须知道的（2026-08-31 实测）：

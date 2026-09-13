@@ -25,7 +25,7 @@
 | 「怎么被 AI 引用」「AEO/GEO 怎么做」→ 问的是**为什么、值不值** | **rankup 自己**（[`seo-growth.md`](seo-growth.md) 三-B：Google 官方指南、Information Gain、Preferred Sources） |
 | 「怎么被 AI 引用」→ 问的是**这篇文章要写成什么形状** | **`/ai-seo`**（逐平台来源选择机制 + 内容改写模式 + llms.txt/OKF 知识包） |
 | 「加个结构化数据」「JSON-LD 怎么写」 | **`/seo-geo`**，且只读它的 `references/schema-templates.md`。rankup 全仓没有模板库 |
-| 「帮我看看这站有什么 SEO 问题」 | **rankup 自己**（`seo-audit.mjs --sitemap` + `pagespeed.mjs plan` 后读网页版 + `ahrefs-site-audit.mjs`）。**不要加载 seo-audit Skill**，理由见第三节 |
+| 「帮我看看这站有什么 SEO 问题」 | **rankup 自己**（`seo-audit.mjs --sitemap` + `pagespeed.mjs collect`（`plan` 只出链接不采数，仅兜底）+ `ahrefs-site-audit.mjs`）。**不要加载 seo-audit Skill**，理由见第三节 |
 | 「查一下 X 是怎么回事」「这个 Google 更新到底改了什么」 | **`/deep-research`**（方法论）+ **`/anysearch`**（执行）。rankup 的 demand/ 只吃结构化源 |
 | 「大家怎么评价 X」「小红书/推特/B站上怎么说」 | **`/agent-reach`**。这正是 capability-map §二「用户的原话」那一行缺的取数通路 |
 | 「这个领域现在有哪些 skill」「别人写过没」 | **`/skillsmp`**（1.6M 索引）。要「最近 7 天新冒出来的」才用 `demand/github-skill-search.mjs --mode recent` |
@@ -158,7 +158,7 @@ rankup 自己只保留 `cf-zone-setup.mjs`（zone onboarding，**Wrangler 没有
    有「seo-audit 判读指引」的 error/warning 分级实测、Ahrefs 档位实测、第三方工具接不接的对账。
 
 **结论：不加载。**「帮我看看这站有什么 SEO 问题」的正确链路是
-`seo-audit.mjs --sitemap` → `pagespeed.mjs plan` 后读 pagespeed.web.dev（实验室+现场两套）→ `ahrefs-site-audit.mjs report`（第二双眼睛）
+`seo-audit.mjs --sitemap` → `pagespeed.mjs collect`（默认路径，直接落 LHR JSON；`plan` 只出链接、不采数，仅兜底）读实验室+现场两套 → `ahrefs-site-audit.mjs report`（第二双眼睛）
 → 判读对 [`seo-box.md`](seo-box.md) + [`checklists.md`](checklists.md) 段 4。
 
 ### `/write` —— 附属 Skill 装齐才加载，缺就用 find-skills 装齐
