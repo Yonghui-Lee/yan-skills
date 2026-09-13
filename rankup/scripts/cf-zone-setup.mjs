@@ -28,7 +28,7 @@
  * 是幂等替换，不是追加，所以不需要先建 ruleset 再改）。`--to` 必须显式指定 www
  * 或 apex，不设默认值——方向是意图声明，不能靠猜。
  *
- * 两个已验证的坑（2026-09-13，真实项目复盘）：
+ * 四个已验证的坑（2026-09-13，两个真实项目分别复盘）：
  *   1. target_url 的 expression **不支持 if()**——Cloudflare 的 wirefilter 表达式
  *      语法会报 `unknown identifier`。查询串保留与否交给同级的
  *      `preserve_query_string` 参数处理，不要在 expression 里手写判空逻辑。
@@ -37,8 +37,27 @@
  *      会先被 Always Use HTTPS 接走升级协议、再撞上这条规则，变成两跳而不是一跳。
  *      这里手写的规则按 `http.host eq "..."` 匹配（不含协议前缀），不管来源协议
  *      是 http 还是 https 都一次性跳到位，这是刻意的设计，不是疏漏。
+ *   3. **PUT body 不能带 `kind`/`phase` 字段**——它们是只读的、由 URL 决定，照抄
+ *      GET 响应的完整字段回填会被拒绝（`invalid JSON: unknown field "kind"`）；
+ *      body 只认 `name`/`description`/`rules` 三个字段，且**从零创建**这个 phase
+ *      时（该 zone 此前从没配置过，GET 报 `could not find entrypoint ruleset`）
+ *      必须带上 `name`/`description` 才能建成功，本脚本因此固定带上这两个字段，
+ *      不依赖 entrypoint 是否已经存在。
+ *   4. **为什么走 dynamic redirect phase 而不是在 Worker 代码里判断 host 跳转**：
+ *      `www` 子域名在 Workers 场景下常见的接法是一条指向占位地址的 DNS 记录
+ *      （例如 `AAAA www.<domain> -> 100::`，`proxied: true`），实际请求由同一个
+ *      Worker 处理——但如果 Worker 自己的路由对这个 host 没有显式处理，会直接
+ *      404，而不是"什么都不做，内容照常返回"。把跳转放在 zone 级的 dynamic
+ *      redirect phase 里，请求在到达 Worker 之前就已经跳转完毕，不依赖 Worker
+ *      代码是否覆盖了这个 host，也不需要为了这一条重定向单独发一次 Worker 部署。
  *
- * 已验证：2026-08-21（status/create）；check-redirects/apply-redirects：2026-09-13
+ * 已验证：2026-08-21（status/create）。check-redirects：2026-09-13 在真实账号上
+ * 跑通只读核验。apply-redirects 本身未在真实账号上跑过这份脚本代码——上面四条坑
+ * 与"一跳到位"的复验，来自两个真实项目当天用等价的手工 curl 调用（同一套
+ * API/端点/body 形状）分别跑通「已有 entrypoint、覆盖式更新」与「从零创建
+ * entrypoint」两条路径，脚本按那两次手工调用的确切请求复刻；换新账号第一次用
+ * apply-redirects 时建议先 check-redirects 核对现状，执行后也再 check-redirects
+ * 一次确认。
  */
 import { readFileSync, existsSync } from "node:fs"
 import { join } from "node:path"
@@ -228,7 +247,13 @@ async function doApplyRedirects(domain, direction) {
 
   const zone = await findZoneOrDie(domain)
   const httpsBody = { value: "on" }
-  const rulesetBody = { rules: buildWwwToApexRedirectRule(domain, direction) }
+  // 【实测坑，2026-09-13，另一真实项目复盘】entrypoint 端点的 PUT body 只认
+  // name / description / rules 三个字段——kind / phase 是只读的、由 URL 决定，
+  // 照抄 GET 响应的完整字段回填会被拒绝（`invalid JSON: unknown field "kind"`）。
+  // 反过来，zone 此前从未配置过这个 phase 时（GET 报 `could not find entrypoint
+  // ruleset`），PUT 必须带 name/description 才能建成功，光传 { rules: [...] }
+  // 在"从零创建"这条路径上不可靠，所以两个字段固定带上，不依赖是否已存在。
+  const rulesetBody = { name: "default", description: "", rules: buildWwwToApexRedirectRule(domain, direction) }
 
   console.log(`── 即将对 ${domain}（zone ${zone.id}）执行写操作，立刻生效 ──\n`)
   console.log(`PATCH /zones/${zone.id}/settings/always_use_https`)
