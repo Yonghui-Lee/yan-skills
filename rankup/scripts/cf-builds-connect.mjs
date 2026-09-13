@@ -50,9 +50,11 @@
  *   印出来，此时去 GitHub → Settings → Installations → 对应 App → Repository access 里手动
  *   勾选目标仓库，勾完重跑本脚本即可，不需要重装 App、不需要为后续项目重复这一步。
  *
- * 凭据：只从环境变量读，不接受命令行参数、不打印、不落盘。二选一：
- *   CLOUDFLARE_API_TOKEN                          （scoped API Token，Authorization: Bearer）
- *   CLOUDFLARE_EMAIL + CLOUDFLARE_API_KEY         （Global API Key，X-Auth-Email/X-Auth-Key）
+ * 凭据：只从环境变量读，不接受命令行参数、不打印、不落盘。解析统一走
+ * ./lib-cf-auth.mjs 的 resolveCfAuth（2026-09-13 收敛，历史原因见该文件头注释），
+ * 二选一：
+ *   CLOUDFLARE_API_TOKEN 或 CF_API_TOKEN                        （scoped API Token，Authorization: Bearer）
+ *   CF_EMAIL/CLOUDFLARE_EMAIL + CF_GLOBAL_KEY/CLOUDFLARE_API_KEY （Global API Key，X-Auth-Email/X-Auth-Key，必须成对）
  * 账号有多个时用 CLOUDFLARE_ACCOUNT_ID 显式指定，否则脚本要求唯一。
  *
  * 本脚本会新建一个专用的、窄权限的 Cloudflare API token（Workers Scripts Write +
@@ -79,6 +81,7 @@
  * `/accounts/{id}/tokens/permission_groups` 里没有 "User Details Read"，混着从一个端点查
  * 会直接报「找不到权限组」，必须分开查两次。
  */
+import { cfAuthHeaders } from "./lib-cf-auth.mjs"
 
 const API = "https://api.cloudflare.com/client/v4"
 
@@ -128,24 +131,18 @@ function printHelp() {
   [--trigger-name <name>] [--repo-id <id>] [--dry-run]
 
 给已存在的 Cloudflare Worker 接上 Workers Builds Git 集成，全程走 Cloudflare API。
-凭据从环境变量读：CLOUDFLARE_API_TOKEN，或 CLOUDFLARE_EMAIL + CLOUDFLARE_API_KEY。
+凭据从环境变量读，二选一：CLOUDFLARE_API_TOKEN/CF_API_TOKEN，或
+CF_EMAIL/CLOUDFLARE_EMAIL + CF_GLOBAL_KEY/CLOUDFLARE_API_KEY（详细优先级见 lib-cf-auth.mjs）。
 详细参数说明、前置条件与已验证的踩坑记录见本文件头部注释。`)
 }
 
 function authHeaders() {
-  if (process.env.CLOUDFLARE_API_TOKEN) {
-    return { Authorization: `Bearer ${process.env.CLOUDFLARE_API_TOKEN.trim()}` }
+  try {
+    return cfAuthHeaders()
+  } catch (e) {
+    console.error(e.message)
+    process.exit(2)
   }
-  if (process.env.CLOUDFLARE_EMAIL && process.env.CLOUDFLARE_API_KEY) {
-    return {
-      "X-Auth-Email": process.env.CLOUDFLARE_EMAIL.trim(),
-      "X-Auth-Key": process.env.CLOUDFLARE_API_KEY.trim(),
-    }
-  }
-  console.error(`找不到凭据。二选一：
-  export CLOUDFLARE_API_TOKEN=...
-  export CLOUDFLARE_EMAIL=... CLOUDFLARE_API_KEY=...`)
-  process.exit(2)
 }
 
 function redactHeaders(headers) {

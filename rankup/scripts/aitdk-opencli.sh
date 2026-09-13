@@ -64,6 +64,16 @@
 # adjacent runs and leaves anything it cannot align in `unpaired`. The full
 # text is always kept in `raw`.
 #
+# GEO has an extra render-timing problem independent of parsing (found
+# 2026-09-13): its total score animates in after the tab switch and can
+# briefly read as only the five category labels with no digits at all, or as
+# a frozen "0 / 100" mid-animation — both silent (no error/warning) and both
+# would otherwise get written into the report as a false blank/near-zero
+# score. geo_score_from_text() plus the GEO-specific retry loop in the main
+# section loop poll until the score settles before accepting the read; see
+# the comments at both call sites for the exact symptoms this was observed
+# to produce.
+#
 # Usage:
 #   aitdk-opencli.sh <url> [session-name] [output-file] [--skip-panel]
 #
@@ -77,6 +87,19 @@ set -euo pipefail
 # ---------- opencli binary ----------
 # The global `opencli` on PATH is a separate npm install without the iframe
 # support this script needs — always use the local checkout's build.
+#
+# zsh gotcha (found 2026-09-13): the `$OPENCLI_BIN browser ...` pattern below
+# only word-splits correctly because this file has a `#!/usr/bin/env bash`
+# shebang and always runs under bash. If you copy this variable-then-call
+# pattern into a one-off command typed straight into a zsh shell (e.g.
+# building an ad-hoc follow-up snippet instead of a `.sh` file), zsh will NOT
+# word-split the unquoted variable: `$OPENCLI_BIN browser ...` gets treated
+# as one literal command name ("node /path/to/main.js") and fails with
+# "no such file or directory" — which reads exactly like opencli being
+# missing, not like a shell quoting issue. Fix: either spell the full command
+# out literally (no stored variable) or put it in its own `.sh` file and run
+# that with `bash file.sh`; don't rely on unquoted variable expansion for
+# ad-hoc opencli one-liners typed directly into a zsh shell.
 OPENCLI_BIN="${OPENCLI_BIN:-node /Users/kcsx/Project/kcsx/opencli/dist/src/main.js}"
 
 # ---------- args ----------
@@ -493,6 +516,27 @@ print(json.dumps({
 }, ensure_ascii=False))
 PY
 }
+
+# The GEO section's total score renders after a short animation on tab
+# switch and, on a fresh read, can briefly come back as only the five
+# category labels repeated with no digits at all (bodyLength still reads
+# ~190, well above the generic "empty" threshold below, so that retry never
+# fires), or as a score frozen at "0 / 100" mid-animation. Both symptoms are
+# silent — no error, no warning — and would otherwise get written into the
+# report as a false blank/near-zero GEO score. Look for the first standalone
+# numeric line within a few lines after a "GEO Score" marker; empty output
+# means "not rendered yet, keep waiting".
+geo_score_from_text() {
+  printf '%s\n' "$1" | awk '
+    BEGIN { IGNORECASE = 1; found = 0 }
+    /GEO Score/ { found = NR; next }
+    found && NR <= found + 6 {
+      line = $0
+      gsub(/^[ \t]+|[ \t]+$/, "", line)
+      if (line ~ /^[0-9]+$/) { print line; exit }
+    }
+  '
+}
 # ============================================================================
 # PART B — AITDK extension panel via opencli frame-eval
 # ============================================================================
@@ -723,6 +767,34 @@ for label in "${PANEL_SECTIONS[@]}"; do
     SECTION_JSON="$(parse_section_text "$SECTION_TEXT" 2>/dev/null || echo '{}')"
     BODY_LEN="$(jq -r '(.bodyLength // 0)' <<<"$SECTION_JSON" 2>/dev/null || echo 0)"
   fi
+
+  # GEO-specific: the body-length check above only catches "empty", but GEO's
+  # score can look non-empty (~190 chars of just category labels) while the
+  # actual score digits either haven't rendered yet or are frozen at "0 / 100"
+  # mid-animation. Poll a bounded number of times until the score settles on
+  # a non-zero reading. See geo_score_from_text() above for what this looks
+  # for and why the generic empty-check can't catch this case.
+  if [[ "$label" == "GEO" ]]; then
+    geo_attempt=0
+    geo_score="$(geo_score_from_text "$SECTION_TEXT")"
+    while [[ "$geo_attempt" -lt 5 && ( -z "$geo_score" || "$geo_score" == "0" ) ]]; do
+      geo_attempt=$((geo_attempt + 1))
+      warn "Section 'GEO': score not settled yet (read: '${geo_score:-<none>}') — waiting 5s and re-reading ($geo_attempt/5)"
+      sleep 5
+      ensure_frame || true
+      SECTION_TEXT="$(fe "$READ_JS" 2>/dev/null || true)"
+      SECTION_JSON="$(parse_section_text "$SECTION_TEXT" 2>/dev/null || echo '{}')"
+      BODY_LEN="$(jq -r '(.bodyLength // 0)' <<<"$SECTION_JSON" 2>/dev/null || echo 0)"
+      geo_score="$(geo_score_from_text "$SECTION_TEXT")"
+    done
+    if [[ -z "$geo_score" || "$geo_score" == "0" ]]; then
+      warn "Section 'GEO': score still unsettled after ${geo_attempt} extra read(s) (last: '${geo_score:-<none>}') — recording as-is; do not trust this as a real 0/blank score without checking manually"
+      panel_errors+=("geo: score unsettled after retries (last read: '${geo_score:-<none>}')")
+    elif [[ "$geo_attempt" -gt 0 ]]; then
+      ok "Section 'GEO': score settled at $geo_score after ${geo_attempt} extra read(s)"
+    fi
+  fi
+
   if [[ "${BODY_LEN:-0}" -eq 0 ]]; then
     warn "Section '$label': still empty after retry"
     panel_errors+=("$key: empty content")
