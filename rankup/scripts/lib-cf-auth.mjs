@@ -44,6 +44,15 @@
  * wrangler token 兜底的具体用法。
  *
  * 真实凭据值本文件不打印、不落盘、不进日志——只往外传，从不主动输出。
+ *
+ * ── account id 同样收敛在这里（2026-09-13 追加）──────────────────────
+ *
+ * 除了凭据本身，`cf-zone-setup.mjs`/`cf-analytics-setup.mjs`（只认
+ * `CF_ACCOUNT_ID`）与 `cf-builds-connect.mjs`（只认 `CLOUDFLARE_ACCOUNT_ID`）
+ * 三处 account id 的读取也各写各的，是同一类"变量名不统一"问题。见下方
+ * `resolveCfAccountId`：两个变量名都认（`CLOUDFLARE_ACCOUNT_ID` 优先），都没有
+ * 时可选地调 `GET /accounts` 兜底，唯一账号直接用、账号为空或有多个则报错列出
+ * 变量名（账号 id/name 本身不是凭据，多个账号时会一并列出帮助挑选）。
  */
 
 /** 跳过 undefined/null/空白字符串，返回第一个非空的 trim 结果；否则 undefined。 */
@@ -132,4 +141,71 @@ export function resolveCfAuth({ token, email, key, env = process.env } = {}) {
  */
 export function cfAuthHeaders(overrides) {
   return resolveCfAuth(overrides).headers
+}
+
+/**
+ * 解析 Cloudflare account id——和凭据一样，遗留下来三份手搓实现读的变量名不
+ * 统一：`cf-zone-setup.mjs`/`cf-analytics-setup.mjs` 只认 `CF_ACCOUNT_ID`，
+ * `cf-builds-connect.mjs` 只认 `CLOUDFLARE_ACCOUNT_ID`，本机哪怕配好了其中一个，
+ * 另外的脚本照样读不到。一并收敛到这里，优先级规则与 `resolveCfAuth` 保持同一条
+ * 准则：`CLOUDFLARE_*` 优先于 `CF_*`。
+ *
+ * 解析顺序：
+ *   1. 显式传入的 `accountId`（调用方来自 CLI 参数等，优先于环境变量）。
+ *   2. 环境变量 `CLOUDFLARE_ACCOUNT_ID`，再 `CF_ACCOUNT_ID`。
+ *   3. 两者都没有 → 调 `GET /accounts`（用 `headers` 或者内部先跑一次
+ *      `resolveCfAuth` 拿 header）：
+ *        账号唯一 → 直接用它的 id。
+ *        账号为空或有多个 → 抛 `CfAuthError`，报错只列可接受的环境变量名——
+ *        多个账号时额外列出账号 id/name 帮助挑选（这是账号列表，不是凭据值，
+ *        可以打印；真实 token/key 依旧不打印、不落盘、不进日志）。
+ *
+ * 只有环境变量都没给时才会发一次网络请求；调用方想完全离线跑（例如
+ * `--dry-run`）应在调用前自己判断要不要跳过，本函数不做隐式短路。
+ *
+ * @param {object} [opts]
+ * @param {string} [opts.accountId] 显式传入的 account id，优先于环境变量。
+ * @param {NodeJS.ProcessEnv} [opts.env] 环境变量来源，默认 `process.env`。
+ * @param {Record<string,string>} [opts.headers] 已经解析好的 Cloudflare 认证
+ *   header（例如 `cfAuthHeaders()` 的返回值）；不传时本函数自己用 `overrides`
+ *   走 `resolveCfAuth` 解析一次。
+ * @param {object} [opts.overrides] 没传 `headers` 时，透传给 `resolveCfAuth`
+ *   的 `token`/`email`/`key` 覆盖值。
+ * @param {typeof fetch} [opts.fetchImpl] 主要供单测替换掉真实网络请求。
+ * @param {string} [opts.apiBase] Cloudflare API base，默认官方地址。
+ * @returns {Promise<string>}
+ * @throws {CfAuthError} 两个环境变量都没给、且账号列表为空或有多个时。
+ */
+export async function resolveCfAccountId({
+  accountId,
+  env = process.env,
+  headers,
+  overrides,
+  fetchImpl = fetch,
+  apiBase = "https://api.cloudflare.com/client/v4",
+} = {}) {
+  const explicit = firstNonEmpty(accountId, env.CLOUDFLARE_ACCOUNT_ID, env.CF_ACCOUNT_ID)
+  if (explicit) return explicit
+
+  const authHeaders = headers || resolveCfAuth({ ...overrides, env }).headers
+  const res = await fetchImpl(`${apiBase}/accounts`, { headers: authHeaders })
+  const json = await res.json().catch(() => ({}))
+  if (!json.success) {
+    const msg = (json.errors || []).map((e) => `${e.code} ${e.message}`).join("; ")
+    throw new CfAuthError(`GET /accounts → HTTP ${res.status}: ${msg || "未知错误"}`)
+  }
+  const accounts = json.result || []
+  if (!accounts.length) {
+    throw new CfAuthError(
+      `这个凭据下看不到任何 Cloudflare 账号，请显式设置 CLOUDFLARE_ACCOUNT_ID 或 CF_ACCOUNT_ID。\n` +
+        `（如果确定账号下有内容却查不到，也可能是 token 权限范围没勾 Account Resources。）`,
+    )
+  }
+  if (accounts.length > 1) {
+    throw new CfAuthError(
+      `这个凭据下有多个账号，请显式设置 CLOUDFLARE_ACCOUNT_ID 或 CF_ACCOUNT_ID：\n` +
+        accounts.map((a) => `  ${a.id}  ${a.name}`).join("\n"),
+    )
+  }
+  return accounts[0].id
 }

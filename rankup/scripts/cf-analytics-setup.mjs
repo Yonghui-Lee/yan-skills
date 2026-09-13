@@ -79,7 +79,7 @@ import { join } from "node:path"
 import { realpath } from "node:fs/promises"
 import path from "node:path"
 import { pathToFileURL } from "node:url"
-import { cfAuthHeaders } from "./lib-cf-auth.mjs"
+import { cfAuthHeaders, resolveCfAccountId } from "./lib-cf-auth.mjs"
 
 const API = "https://api.cloudflare.com/client/v4"
 
@@ -263,8 +263,7 @@ async function findSite(domain) {
   if (!zones.length) throw new Error(`${domain} 不在这个账号里，先跑 cf-zone-setup.mjs create`)
   const zone = zones[0]
 
-  const accounts = await cf("/accounts")
-  const accountId = process.env.CF_ACCOUNT_ID || accounts[0].id
+  const accountId = await resolveCfAccountId({ headers: authHeaders() })
 
   // 必须分页：默认每页 10 条，账号站点一多就会把已存在的条目判成「不存在」而重复创建。
   const existing = await cf(`/accounts/${accountId}/rum/site_info/list?per_page=100`)

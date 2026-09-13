@@ -67,7 +67,7 @@ import { join } from "node:path"
 import { realpath } from "node:fs/promises"
 import path from "node:path"
 import { pathToFileURL } from "node:url"
-import { cfAuthHeaders } from "./lib-cf-auth.mjs"
+import { cfAuthHeaders, resolveCfAccountId, CfAuthError } from "./lib-cf-auth.mjs"
 
 const API = "https://api.cloudflare.com/client/v4"
 
@@ -319,14 +319,16 @@ async function main() {
     process.exit(0)
   }
 
-  const accounts = await cf("/accounts")
-  if (!accounts.length) throw new Error("这个 token 看不到任何账号——检查 Account Resources 范围")
-  if (accounts.length > 1) {
-    console.error("token 能看到多个账号，请用 CF_ACCOUNT_ID 指定：")
-    for (const a of accounts) console.error(`  ${a.name}  ${a.id}`)
-    if (!process.env.CF_ACCOUNT_ID) process.exit(2)
+  let accountId
+  try {
+    accountId = await resolveCfAccountId({ headers: authHeaders() })
+  } catch (e) {
+    if (e instanceof CfAuthError) {
+      console.error(e.message)
+      process.exit(2)
+    }
+    throw e
   }
-  const accountId = process.env.CF_ACCOUNT_ID || accounts[0].id
 
   const zone = await cf("/zones", {
     method: "POST",

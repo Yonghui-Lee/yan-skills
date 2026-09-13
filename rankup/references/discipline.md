@@ -365,6 +365,10 @@ Skill 集合不一样，文档只保证「该用什么」；遇缺就跳过会�
    `cf-builds-connect.mjs`、`yandex-setup.mjs` 统一改走这个函数，不再各自手搓判据——
    曾经五份手搓实现各读不同的变量名，本机凭据明明配的是 `CF_EMAIL`+`CF_GLOBAL_KEY`，
    却有脚本读不到，正是规则 3「调用方脚本必须和驱动脚本用同一套解析」要挡的那类问题。
+   account id 是同一类问题的另一处：认 `CLOUDFLARE_ACCOUNT_ID` 或 `CF_ACCOUNT_ID`
+   （同时设置时 `CLOUDFLARE_ACCOUNT_ID` 优先），统一解析走同一个文件的
+   `resolveCfAccountId`；两个都没配时它会调 `GET /accounts` 兜底，账号唯一直接用，
+   账号为空或有多个则报错列出这两个变量名（不打印任何凭据值）。
 
 安装后 `.env` 不存在是正常状态，首次需要令牌时创建即可。
 

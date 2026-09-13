@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { resolveCfAuth, cfAuthHeaders, cfAuthEnvHelp, CfAuthError } from "../scripts/lib-cf-auth.mjs";
+import { resolveCfAuth, cfAuthHeaders, cfAuthEnvHelp, resolveCfAccountId, CfAuthError } from "../scripts/lib-cf-auth.mjs";
 
 // 全程只用假值（fake-*），绝不读取/打印任何真实凭据。断言只看变量名/头名有没有
 // 正确出现，不断言真实凭据的内容。
@@ -179,4 +179,154 @@ test("resolveCfAuth: 默认读 process.env（不传 env 时），并在用完后
   }
   // 现场已还原：再次读取应该拿到测试开始前的原始状态，而不是被测试污染。
   for (const k of KEYS) assert.equal(process.env[k], saved[k]);
+});
+
+// ── resolveCfAccountId ──────────────────────────────────────────────────
+// 同样只用假值；网络调用一律用 fetchImpl 假实现拦截，真实测试环境不发请求。
+
+function fakeFetch(response) {
+  const calls = [];
+  const impl = async (url, init) => {
+    calls.push({ url, init });
+    return {
+      status: response.status ?? 200,
+      json: async () => response.body,
+    };
+  };
+  impl.calls = calls;
+  return impl;
+}
+
+test("resolveCfAccountId: 显式传入 accountId 时直接用它，不发请求", async () => {
+  const fetchImpl = fakeFetch({ body: { success: true, result: [] } });
+  const id = await resolveCfAccountId({ accountId: "explicit-acct", env: {}, fetchImpl });
+  assert.equal(id, "explicit-acct");
+  assert.equal(fetchImpl.calls.length, 0);
+});
+
+test("resolveCfAccountId: 只有 CF_ACCOUNT_ID 时读它，不发请求", async () => {
+  const fetchImpl = fakeFetch({ body: { success: true, result: [] } });
+  const id = await resolveCfAccountId({ env: { CF_ACCOUNT_ID: "fake-acct-cf" }, fetchImpl });
+  assert.equal(id, "fake-acct-cf");
+  assert.equal(fetchImpl.calls.length, 0);
+});
+
+test("resolveCfAccountId: 只有 CLOUDFLARE_ACCOUNT_ID 时读它，不发请求", async () => {
+  const fetchImpl = fakeFetch({ body: { success: true, result: [] } });
+  const id = await resolveCfAccountId({ env: { CLOUDFLARE_ACCOUNT_ID: "fake-acct-cloudflare" }, fetchImpl });
+  assert.equal(id, "fake-acct-cloudflare");
+  assert.equal(fetchImpl.calls.length, 0);
+});
+
+test("resolveCfAccountId: 两个变量都设置时，CLOUDFLARE_ACCOUNT_ID 优先（与 resolveCfAuth 同一条准则）", async () => {
+  const fetchImpl = fakeFetch({ body: { success: true, result: [] } });
+  const id = await resolveCfAccountId({
+    env: { CLOUDFLARE_ACCOUNT_ID: "fake-acct-wins", CF_ACCOUNT_ID: "fake-acct-loses" },
+    fetchImpl,
+  });
+  assert.equal(id, "fake-acct-wins");
+});
+
+test("resolveCfAccountId: 显式参数优先于两个环境变量", async () => {
+  const fetchImpl = fakeFetch({ body: { success: true, result: [] } });
+  const id = await resolveCfAccountId({
+    accountId: "explicit-wins",
+    env: { CLOUDFLARE_ACCOUNT_ID: "fake-acct-loses-1", CF_ACCOUNT_ID: "fake-acct-loses-2" },
+    fetchImpl,
+  });
+  assert.equal(id, "explicit-wins");
+});
+
+test("resolveCfAccountId: 环境变量值前后空白会被 trim", async () => {
+  const fetchImpl = fakeFetch({ body: { success: true, result: [] } });
+  const id = await resolveCfAccountId({ env: { CF_ACCOUNT_ID: "  fake-acct-padded  " }, fetchImpl });
+  assert.equal(id, "fake-acct-padded");
+});
+
+test("resolveCfAccountId: 两个变量都没配时，调 GET /accounts；账号唯一时直接用它", async () => {
+  const fetchImpl = fakeFetch({
+    body: { success: true, result: [{ id: "only-account-id", name: "Only Account" }] },
+  });
+  const id = await resolveCfAccountId({
+    env: {},
+    headers: { Authorization: "Bearer fake-token-for-account-lookup" },
+    fetchImpl,
+  });
+  assert.equal(id, "only-account-id");
+  assert.equal(fetchImpl.calls.length, 1);
+  assert.equal(fetchImpl.calls[0].url, "https://api.cloudflare.com/client/v4/accounts");
+  assert.deepEqual(fetchImpl.calls[0].init.headers, { Authorization: "Bearer fake-token-for-account-lookup" });
+});
+
+test("resolveCfAccountId: 没传 headers 时，自己用 overrides 走 resolveCfAuth 拼一份", async () => {
+  const fetchImpl = fakeFetch({
+    body: { success: true, result: [{ id: "only-account-id-2", name: "Only Account 2" }] },
+  });
+  const id = await resolveCfAccountId({
+    env: {},
+    overrides: { token: "fake-token-via-overrides" },
+    fetchImpl,
+  });
+  assert.equal(id, "only-account-id-2");
+  assert.deepEqual(fetchImpl.calls[0].init.headers, { Authorization: "Bearer fake-token-via-overrides" });
+});
+
+test("resolveCfAccountId: apiBase 可覆盖，用于拼请求 URL", async () => {
+  const fetchImpl = fakeFetch({ body: { success: true, result: [{ id: "acct", name: "A" }] } });
+  await resolveCfAccountId({ env: {}, headers: {}, fetchImpl, apiBase: "https://fake-api.example.com/v9" });
+  assert.equal(fetchImpl.calls[0].url, "https://fake-api.example.com/v9/accounts");
+});
+
+test("resolveCfAccountId: 账号列表为空时抛 CfAuthError，消息里列出两个可接受的变量名", async () => {
+  const fetchImpl = fakeFetch({ body: { success: true, result: [] } });
+  await assert.rejects(
+    () => resolveCfAccountId({ env: {}, headers: {}, fetchImpl }),
+    (err) => {
+      assert.ok(err instanceof CfAuthError);
+      assert.match(err.message, /CLOUDFLARE_ACCOUNT_ID/);
+      assert.match(err.message, /CF_ACCOUNT_ID/);
+      return true;
+    },
+  );
+});
+
+test("resolveCfAccountId: 账号有多个时抛 CfAuthError，消息里列出变量名以及每个账号的 id/name", async () => {
+  const fetchImpl = fakeFetch({
+    body: {
+      success: true,
+      result: [
+        { id: "acct-one", name: "Account One" },
+        { id: "acct-two", name: "Account Two" },
+      ],
+    },
+  });
+  await assert.rejects(
+    () => resolveCfAccountId({ env: {}, headers: {}, fetchImpl }),
+    (err) => {
+      assert.ok(err instanceof CfAuthError);
+      assert.match(err.message, /CLOUDFLARE_ACCOUNT_ID/);
+      assert.match(err.message, /CF_ACCOUNT_ID/);
+      assert.match(err.message, /acct-one/);
+      assert.match(err.message, /Account One/);
+      assert.match(err.message, /acct-two/);
+      assert.match(err.message, /Account Two/);
+      return true;
+    },
+  );
+});
+
+test("resolveCfAccountId: API 返回 success:false 时抛 CfAuthError，消息里带 HTTP 状态码", async () => {
+  const fetchImpl = fakeFetch({
+    status: 403,
+    body: { success: false, errors: [{ code: 9109, message: "Invalid access token" }] },
+  });
+  await assert.rejects(
+    () => resolveCfAccountId({ env: {}, headers: {}, fetchImpl }),
+    (err) => {
+      assert.ok(err instanceof CfAuthError);
+      assert.match(err.message, /403/);
+      assert.match(err.message, /Invalid access token/);
+      return true;
+    },
+  );
 });
