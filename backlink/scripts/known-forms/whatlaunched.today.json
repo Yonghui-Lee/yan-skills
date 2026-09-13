@@ -1,0 +1,175 @@
+{
+  "domain": "whatlaunched.today",
+  "route": "https://whatlaunched.today/dashboard/submit",
+  "cohort": "account",
+  "requireConfirmedLogin": true,
+  "sessionPrefix": "backlink-known-whatlaunched",
+  "refreshParam": null,
+  "verifiedAt": "2026-09-13",
+  "verifiedBy": "manual OpenCLI walk (no inspect-page.mjs / submit-known.mjs run — see shapeWarning below), 3 real submissions end-to-end confirmed via the /dashboard/submit/success page and new cards on /dashboard/my-products (BirthstoneMeaning, Coco, Better Call Saul Card Generator)",
+  "shapeWarning": [
+    "THIS TARGET DOES NOT FIT scripts/submit-known.mjs. That driver assumes ONE page with (url,name,email,description) + optional selects + a single submit button. whatlaunched.today/dashboard/submit is a stateful 3-step wizard (PLAN -> INFO -> ASSETS) that also injects an unskippable calendar step and a checkout-confirmation step after the visible 'Submit Product' button, all inside client-side React state with no intermediate URL changes to key off. Do not point submit-known.mjs at this file expecting it to work; it will not resolve these steps.",
+    "This recipe exists as HUMAN/AGENT-READABLE documentation of the field map, options, and quirks, to be replayed with plain `opencli browser` calls (open/click/fill/select) in the sequence documented in `steps` below, not as a submit-known.mjs-consumable payload.",
+    "If someone builds a dedicated multi-step driver for this family of directory site later, this file's `steps`, `fieldMap`, `extraFields`, and `quirks` are the field-mapping decisions to reuse — do not re-derive them from scratch."
+  ],
+  "quirks": [
+    {
+      "id": "plan-card-click-sometimes-needs-a-second-click",
+      "severity": "high",
+      "description": "The plan-selection cards (button.aria-pressed, e.g. 'Free Launch', 'Skip the Line') sometimes do not toggle their internal React state on the FIRST CDP-dispatched click even though the click envelope reports {clicked:true, hit:'target', click_method:'cdp'} — the card can even pick up the 'selected' CSS class (border-blue-500/bg-blue-50) without aria-pressed flipping to 'true' and without the bottom 'Continue with plan' button's `disabled` becoming false. Observed on 2 of 3 runs (Coco needed exactly 2 clicks with ~1-1.5s between them; BirthstoneMeaning worked on the first click after several prior read-only calls had already let the page hydrate).",
+      "diagnosis": "Confirmed via `eval` that a genuine React onClick handler IS attached to the button (`el.__reactProps$<hash>.onClick` exists and is a real function, e.g. `()=>s(\"free\")` for the Free Launch card) — the handler itself has no gating logic. The failure is specifically that the synthetic CDP mouse event is not reliably reaching/registering with React's event delegation on this page for some page loads.",
+      "workaround": "After clicking a plan card (or 'Next Step' / 'Submit Product' / a calendar date / 'Continue — Free'), verify the expected state change (aria-pressed, the Continue button's disabled attribute, or the extracted page text/URL). If it did NOT change, re-click once. If repeated CDP clicks (tried up to 4x plus a fresh tab/session) still do not register, fall back to invoking the button's own React handler directly and treat it as equivalent to a real click (it calls the exact same function a trusted click would): `opencli browser <session> eval '(() => { const b = [...document.querySelectorAll(\"button\")].find(x => x.textContent.trim() === \"<exact button text>\"); const k = Object.keys(b).find(k => k.startsWith(\"__reactProps\")); b[k].onClick(); return \"invoked\"; })()'`. This was needed for the entire 3rd submission (Better Call Saul) — a brand-new tab/session did not fix it, so it is not simply tab staleness; cause not fully root-caused (possibly load on the extension/CDP bridge, or a page-side listener race). `opencli` itself sometimes self-detects this and falls back to `click_method:'js'` internally for some elements (observed once on the pricing radio's label) but not consistently for the wizard's primary CTA buttons — do not assume the tool's own fallback covers you; always verify state after every click in this wizard.",
+      "doNotDo": "Do not conclude the button is disabled/broken/gated after one failed click — check the actual DOM state (aria-pressed / disabled attribute / extracted text) before deciding whether to retry or escalate."
+    },
+    {
+      "id": "logo-and-gallery-auto-fetched-from-site-url",
+      "severity": "info-positive",
+      "description": "As soon as the Website URL field (step 2, INFO) is filled and the user advances past it, step 3 (ASSETS) arrives with the required 'Logo *' field and the first 'Gallery' slot ALREADY populated — the site auto-fetches `<origin>/apple-touch-icon.png` (or whatever icon is discoverable) for the logo and an OG/cover image (e.g. `/og/default.png`, `/images/og-homepage.webp`, `/cover-v3.png`) for the first gallery slot. Confirmed on all 3 real targets.",
+      "workaround": "In practice you do NOT need to manually upload a logo file for a target that has a working favicon/apple-touch-icon/OG image. Only attempt a manual upload if the preview stays blank (site has no discoverable icon) — see the next quirk for why manual upload is hard on this form."
+    },
+    {
+      "id": "file-input-is-hidden-opencli-upload-fails",
+      "severity": "medium",
+      "description": "The Logo and Gallery `<input type=file class=hidden>` elements are `display:none`, triggered only by a sibling visible button ('Change Logo' / the drop-zone div) whose click handler calls the hidden input's own `.click()`. `opencli browser <session> upload <ref-or-css> <file>` fails on BOTH the hidden input directly and the visible trigger button: targeting the hidden input times out with `Page.fileChooserOpened not received within 5s` (its zero-size bounding box means the tool's click-and-wait-for-native-chooser flow never actually fires the file dialog); targeting the visible button errors `not_file_input` (the upload command validates the target must literally be an `input[type=file]`).",
+      "workaround": "None found and not needed in practice (see previous quirk — the site's own favicon/OG auto-fetch covers the required Logo field for every real product site). If a target genuinely has no icon, this would need either a real native OS file-chooser interception ahead of a real button click (out of scope for a quick submission) or the target site owner adding a proper favicon first."
+    },
+    {
+      "id": "launch-date-off-by-one",
+      "severity": "low",
+      "description": "The calendar's date buttons are labeled correctly (e.g. 'Tue, Sep 15, 2026 — Free slot available') but clicking one stores an internal date that is ONE DAY EARLIER than the button's label (the checkout summary and the final My Products card both showed 'Sep 14, 2026' after clicking the button labeled 'Sep 15, 2026'), on all 3 runs. Looks like a timezone/UTC-conversion bug on the site's side, not a client error.",
+      "workaround": "None needed — this is cosmetic/site-side and does not block submission. Just don't be alarmed when the confirmed launch date is one day earlier than the calendar button you clicked."
+    },
+    {
+      "id": "standard-cdp-click-fails-on-every-wizard-button-not-just-plan-card",
+      "severity": "high",
+      "description": "2026-09-13 batch run (3 full submissions: Crossword Game, Nonogram Game, In-Tab Tools): the first standard CDP `click` attempt failed to register on EVERY single state-changing button in the wizard, every single time — not just the plan card as the original 'plan-card-click-sometimes-needs-a-second-click' quirk implies. Observed 100% failure (0/6 succeeded on click_method:'cdp' despite {clicked:true, hit:'target'}) for: the 'Free Launch' plan card, 'Continue with plan', 'Next Step', 'Submit Product', a calendar date button, and the final 'Continue — Free' button, across all 3 runs. A second plain re-click also failed every time it was tried (tested on the plan card specifically: 2 clicks, still aria-pressed=false). Only the React-onClick-invocation workaround (documented in the original quirk above) ever worked, on the very first invocation, every time.",
+      "workaround": "Given the 100% failure rate observed, it is more efficient to skip the 'retry a plain click once' step entirely for this wizard and go straight to the React onClick invocation for every one of the 6 state-changing buttons listed above, still verifying the expected DOM state change afterward (aria-pressed / disabled attribute / page text) before moving to the next step. Do not assume a later session will also see 100% failure — keep verifying after each click — but budget for the workaround being needed on every single button, not just the plan card."
+    },
+    {
+      "id": "find-then-click-ref-can-go-stale-between-two-separate-cli-calls",
+      "severity": "medium",
+      "description": "On one run, `browser find --role button --name \"Continue with plan\"` returned a ref (e.g. ref 71) that was correct at the moment `find` ran, but by the time a separate subsequent `browser click 71` call executed, the page had continued to re-render after the prior plan-selection click (the 'Selected plan: Free Launch $0' summary box finished expanding into the DOM), shifting what ref 71 pointed to — the click silently landed on an unrelated element (e.g. a footer social link) instead of the intended button, with the envelope still reporting {clicked:true, hit:'target'}. A subsequent fresh `state` call showed the wizard had NOT advanced, and the real 'Continue with plan' button had been renumbered to a different ref.",
+      "workaround": "Do not split 'locate via find/state' and 'click by remembered ref' across two separate CLI invocations on this wizard when a prior click may still be causing the page to settle/re-render — either click immediately within the same short eval-based lookup (as the React-onClick workaround already does, by re-querying `document.querySelectorAll('button')` live at click time instead of trusting an earlier numeric ref), or re-run `find`/`state` again immediately before issuing the numeric-ref click to get a fresh ref. Numeric refs captured even a few seconds earlier are not safe to reuse on a page that is still visually transitioning."
+    },
+    {
+      "id": "css-id-selectors-work-directly-with-fill-and-select-and-are-more-robust-than-numeric-refs",
+      "severity": "info-positive",
+      "description": "2026-09-13: confirmed `browser fill` and `browser select` accept a plain CSS selector as the positional target (e.g. `fill \"#name\" \"...\"`, `fill \"#tagline\" \"...\"`, `fill \"div[contenteditable=true]\" \"...\"`, `select \"#category\" \"...\"`) and resolve/verify correctly on this wizard's INFO step, without needing a prior `state` call to discover a numeric ref. Used successfully for the 3rd submission (In-Tab Tools) in place of numeric refs.",
+      "workaround": "Prefer CSS id/attribute selectors (`#name`, `#url`, `#tagline`, `#tags`, `#category`, `div[contenteditable=true]`) over numeric `state`/`find` refs for this wizard's static INFO-step fields — they are immune to the ref-renumbering problem described in the 'find-then-click-ref-can-go-stale' quirk above, since id/attribute selectors don't shift when unrelated parts of the page re-render. Numeric refs are still necessary for the plan cards and calendar date buttons, which have no stable id/name attribute to select on."
+    },
+    {
+      "id": "dashboard-pages-can-show-stuck-checking-session-while-actually-logged-in",
+      "severity": "medium",
+      "description": "2026-09-13 batch 2 run: opening `/dashboard/my-products` or `/dashboard/profile` in a brand-new OpenCLI session and immediately calling `extract`/`state` repeatedly (including after an explicit 5s and then 10s sleep, and after a full page reload) returned only the literal 3-word string 'Checking session…' as the entire page content, for well over 15 seconds of wall-clock time across many calls. The header in that same `state` snapshot showed a `Sign In` link (not a logged-in avatar), and `document.cookie` only contained `wlt-country=JP` with no auth token in localStorage/sessionStorage either — every signal pointed to 'not logged in'. A `screenshot` saved to disk and viewed immediately after (no extra wait beyond the open call) showed the fully hydrated page instead: logged-in avatar '少侠' top-right, and a complete 'My Products' list with 6 existing submissions.",
+      "diagnosis": "Not root-caused. Best guess: `extract`/`state` on this Next.js app can sample the DOM during a client-side auth-context re-render/suspense flash that re-triggers on repeated rapid polling of the same tab (each `open` call re-navigates, restarting the flash), while a `screenshot` call — which necessarily happens after the CDP round-trip and PNG encoding, i.e. strictly later in wall-clock time — lands after hydration completes. It is NOT actually a logged-out session; do not conclude the user needs to re-authenticate based on `extract`/`state` output alone on these two dashboard routes.",
+      "workaround": "If `/dashboard/my-products` or `/dashboard/profile` extract/state ever shows only 'Checking session…' plus a `Sign In` header link, do not conclude the login is invalid. Take a `screenshot` to a file and view it (or just proceed to the next wizard step and verify state there) before escalating a login problem to the user. Only trust a `Sign In` link as ground truth for 'not logged in' if it is confirmed via a rendered screenshot or via `eval` reading `document.body.innerText` on the marketing homepage (`/` or `/en`), not via a dashboard route's `extract` mid-flash."
+    },
+    {
+      "id": "final-continue-free-click-does-not-always-land-on-success-page",
+      "severity": "medium",
+      "description": "2026-09-13 batch 2, 2nd submission (shindan.co): after invoking the 'Continue — Free' button's React onClick exactly as documented (same code path that worked for the 1st submission in the same run, which did land on `/dashboard/submit/success?free=1` with the 'Launch submitted!' text), the page instead ended up back at `/dashboard/submit` showing a completely fresh PLAN step (step 1, no plan selected) — no success text, no error, no visible failure signal of any kind.",
+      "diagnosis": "Not root-caused (only 1 occurrence so far, out of 2 submissions in this run). Despite the missing success page, the submission had in fact gone through: reloading `/dashboard/my-products` immediately after showed the new product card (shindan.co, 'Pending review · Community listing', correct tagline, correct launch date) at the top of the list. So the click's side effect (creating the product + advancing dashboard state) succeeded even though the client-side navigation to the success route did not happen as expected.",
+      "workaround": "Never treat the absence of the `/dashboard/submit/success` page (or of the 'Launch submitted!' text) as proof of failure on its own, and never treat its presence as proof of success on its own either — the ONLY reliable success signal for this wizard is `secondaryVerification` (a fresh `/dashboard/my-products` load showing the new card). This was already the documented policy in the top-level `success` field before this run; this entry exists to record a concrete case where skipping that secondary check would have produced a false negative (looked like the submission silently failed and needed retrying, when it had actually already succeeded — retrying blindly here would have created a duplicate product)."
+    },
+    {
+      "id": "free-launch-calendar-slots-have-a-rolling-cap-contradicts-earlier-no-cap-observation",
+      "severity": "medium",
+      "description": "2026-09-13 batch 2: for the 1st submission of the run (VideoCatch), the calendar showed 'Tue, Sep 15, 2026 — Free slot available' as the earliest free date, which was selected and confirmed (My Products card shows Launch date: Sep 15, 2026, no off-by-one this time — see next quirk). Minutes later, starting the wizard fresh for the 2nd submission (shindan.co) in the SAME session, the calendar now showed Sep 13 through Sep 19, 2026 ALL as 'Full — paid plans only', with the earliest free date pushed out to 'Sun, Sep 20, 2026'.",
+      "diagnosis": "This directly contradicts the earlier quirk 'launch-date-off-by-one''s note ('Every date so far offered has said Free slot available with no daily cap observed') and the `steps[3].action` note ('Every date so far offered has said Free slot available with no daily cap observed'). The free tier evidently has a real, shared (across all makers on the platform, not per-account) rolling cap on how many free launches can land on a given day, and it fills up in real time as other users (or other agents in this same multi-batch task) submit — not something this recipe controls or can predict in advance.",
+      "workaround": "Do not assume the earliest calendar date will be available, and do not hardcode an assumed date offset (e.g. 'day 3 from today'). Always re-query the calendar's button list live (`querySelectorAll('button')` filtered by date-like text) immediately before selecting, exactly as the existing 'find-then-click-ref-can-go-stale' quirk already recommends for other reasons, and pick whichever is the FIRST button whose text includes 'Free slot available' at that moment — it may be several days later than the previous submission's earliest date, even within the same session a few minutes apart."
+    },
+    {
+      "id": "launch-date-off-by-one-not-reproduced-2026-09-13-batch2",
+      "severity": "low",
+      "description": "Addendum to 'launch-date-off-by-one' (which reported the stored date is always one day earlier than the clicked calendar button, on all 3 runs of the 2026-09-13 batch-1 run). In the batch-2 run the same day, the 1st submission (VideoCatch) clicked 'Tue, Sep 15, 2026' and the resulting My Products card showed 'Launch date: Sep 15, 2026' — matching exactly, NOT one day earlier. The 2nd submission (shindan.co) clicked 'Sun, Sep 20, 2026' and got 'Launch date: Sep 20, 2026' — also matching exactly.",
+      "diagnosis": "Not root-caused. Could mean the site fixed a timezone bug between batch 1 and batch 2 on the same day, or the off-by-one was itself date/timezone-dependent (e.g. only manifests for some calendar dates depending on DST or month-boundary edge cases) and simply didn't trigger for Sep 15/Sep 20 specifically. Sample size is too small on both sides (3 vs 2) to call either behavior the new normal.",
+      "workaround": "Keep verifying the actual stored launch date via the My Products card after every submission rather than assuming either 'always off by one' or 'always exact' — report whatever was actually observed for that specific run, as this entry and the original quirk both do."
+    }
+  ],
+  "steps": [
+    {
+      "step": 1,
+      "name": "PLAN",
+      "action": "Click one plan card under 'Launch on What Launched' (the only free option is the 'Free Launch' card, $0). Verify selection via `aria-pressed=\"true\"` on the card and `disabled=false` on the 'Continue with plan' button before clicking it (see quirk plan-card-click-sometimes-needs-a-second-click).",
+      "note": "Other cards in this group ('Skip the Line' ~¥4,400, 'Featured Launch' ~¥5,900) and the 'Boost visibility' / 'Directory packages' sections are all paid upsells — never select these without the user's explicit go-ahead; this recipe only covers the Free Launch path."
+    },
+    {
+      "step": 2,
+      "name": "INFO (Basic Information)",
+      "fields": "see fieldMap below",
+      "action": "Fill all fields, then click 'Next Step'."
+    },
+    {
+      "step": 3,
+      "name": "ASSETS (Additional Details)",
+      "fields": "Logo (auto-filled, see quirk), Product pricing radio (is_free), optional social URLs, Gallery (auto-filled first slot)",
+      "action": "Set the pricing radio, then click 'Submit Product' (this does NOT submit yet — it reveals the calendar step)."
+    },
+    {
+      "step": 4,
+      "name": "Select Launch Date (injected after 'Submit Product')",
+      "action": "A horizontal calendar of ~18 day-buttons appears. Days 1-2 from today are always 'Full — paid plans only' (disabled for the Free plan); pick the earliest button whose text includes 'Free slot available' (site's own copy says free slots start at day 3). Every date so far offered has said 'Free slot available' with no daily cap observed.",
+      "note": "See quirk launch-date-off-by-one for the stored-date discrepancy."
+    },
+    {
+      "step": 5,
+      "name": "Choose your plan (checkout confirmation)",
+      "action": "Re-shows the paid upsell cards (ignore them) plus a bottom bar summarizing 'Free Launch · $0' and a 'Continue — Free' button. Click it to actually submit.",
+      "note": "This is the real point of no return for a free submission — nothing is created in My Products before this click succeeds."
+    }
+  ],
+  "form": {
+    "match": { "requireFieldKinds": ["url", "name", "description"] }
+  },
+  "fieldMap": {
+    "name": { "match": { "id": "name", "tag": "input", "type": "text" } },
+    "url": { "match": { "id": "url", "tag": "input", "type": "url" } },
+    "description": {
+      "match": { "tag": "div", "attr": "contenteditable=true" },
+      "note": "Not a real <textarea>. It's a Tiptap/ProseMirror rich-text div (class includes 'tiptap ProseMirror'), inside the 'Description *' field group. No name/id attribute exists on it — locate it as the only contenteditable=true div on the INFO step, or via find --css \"div[contenteditable=true]\"."
+    },
+    "tagline": {
+      "match": { "id": "tagline", "tag": "input", "type": "text" },
+      "note": "Not one of submit-known.mjs's 4 standard kinds (url/name/email/description) — this site has no email field on the form at all (the account's own login email is used implicitly). Optional, maxlength=60 — plan and pre-shorten any longer copy before filling; the CLI's `fill` command reports the actual verified length back, use that to confirm you're under the cap."
+    },
+    "tags": {
+      "match": { "id": "tags", "tag": "input", "type": "text" },
+      "note": "Comma-separated, maxlength=300, placeholder example 'ai, productivity, saas'. Populates the site's tag/keyword taxonomy for the listing."
+    }
+  },
+  "payloadRequired": ["name", "url", "description", "tags", "category"],
+  "payloadOptional": ["tagline", "twitter_url", "facebook_url", "linkedin_url", "pricing_is_free"],
+  "extraFields": {
+    "category": {
+      "type": "select",
+      "match": { "id": "category", "tag": "select" },
+      "payloadKey": "category",
+      "default": null,
+      "note": "Native <select id=category>, 54 options total including the disabled placeholder. Full value list (label -> value), in DOM order: Select a category -> \"\" (placeholder, not selectable as a real answer) | AI & Machine Learning -> ai | SaaS & Business -> saas | Productivity Tools -> productivity | No-Code Tools -> nocode | Design & Creative -> design | Marketing & Growth -> marketing | Developer Tools -> developer | Mobile Apps -> mobile | Web Apps -> web | E-commerce -> ecommerce | Education & Learning -> education | Health & Fitness -> health | Finance & Crypto -> finance | Social & Community -> social | Gaming & Entertainment -> gaming | Automation -> automation | Analytics & Data -> analytics | Communication -> communication | Security & Privacy -> security | Startup Tools -> startup | Remote Work -> remote | Content Creation -> content | Video & Media -> video | Music & Audio -> music | Photography -> photography | Travel & Lifestyle -> travel | Food & Dining -> food | Fashion & Beauty -> fashion | Sports & Fitness -> sports | Parenting & Family -> parenting | Pets & Animals -> pets | Real Estate -> real-estate | Legal & Compliance -> legal | HR & Recruitment -> hr | CRM & Sales -> crm | Project Management -> project-management | Customer Support -> customer-support | Billing & Payments -> billing | Inventory & Logistics -> inventory | Booking & Scheduling -> booking | Events & Conferences -> events | News & Media -> news | Weather & Environment -> weather | Maps & Location -> maps | Transportation -> transportation | Energy & Sustainability -> energy | Agriculture -> agriculture | Construction -> construction | Manufacturing -> manufacturing | Research & Science -> research | Non-Profit -> nonprofit | Government -> government | Other -> other. Used 'travel' for a birthstone/lifestyle content site, 'productivity' for a macOS launcher utility, 'design' for a fan-art business-card generator — pick the closest semantic fit, there is no 'Reference' or generic 'Content' bucket well-suited to pure informational content sites."
+    },
+    "pricing_is_free": {
+      "type": "radio",
+      "match": { "name": "is_free" },
+      "payloadKey": "pricing_is_free",
+      "default": "Free for users",
+      "note": "Two radios sharing name=is_free: 'Free for users' (default checked on page load) and 'Paid product'. This is about the SUBMITTED PRODUCT's own pricing to its customers, NOT about the whatlaunched.today launch plan (that's the separate PLAN step). Click the associated <label> text, not the radio input itself (the input has no useful standalone target)."
+    }
+  },
+  "socialFields": {
+    "twitter_url": { "match": { "id": "twitter_url", "tag": "input", "type": "url" } },
+    "facebook_url": { "match": { "id": "facebook_url", "tag": "input", "type": "url" } },
+    "linkedin_url": { "match": { "id": "linkedin_url", "tag": "input", "type": "url" } }
+  },
+  "termsCheckbox": null,
+  "submit": {
+    "match": { "text": "Continue — Free" },
+    "note": "This is the FINAL, real submit action for a Free Launch, reached only after: plan card -> Continue with plan -> fill INFO -> Next Step -> fill ASSETS -> Submit Product -> pick a calendar date -> this button. There is also an earlier button literally labeled 'Submit Product' (step 3) which does NOT submit — it only reveals the calendar step. Do not mistake the two."
+  },
+  "retryClickIfNoChange": true,
+  "success": {
+    "type": "navigation",
+    "urlIncludes": "/dashboard/submit/success",
+    "textIncludes": "Launch submitted!",
+    "secondaryVerification": "Reload/open https://whatlaunched.today/dashboard/my-products and confirm a new card exists whose title, tagline, and Created date match this submission — every one of the 3 real runs was cross-checked this way, not just the success-page text."
+  }
+}
