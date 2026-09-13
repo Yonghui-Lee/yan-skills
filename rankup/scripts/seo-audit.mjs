@@ -21,6 +21,18 @@
  *   每个值是一页：{ url, title:{text,length}, description:{text,length}, h1:[…], canonical, robots,
  *   og:{…}, twitter:{…}, images:{total, missingAlt}, links:{…}, density:{…}, issues:[…] } 或 { url, fetchError }。
  *   读法：Object.values(JSON.parse(out))。title / description 是对象，取 .text 与 .length。
+ *
+ * ── sitemap 不等于全站，别假设 --sitemap 已经覆盖了所有该测的页面 ─────
+ *
+ * 【实测，2026-09-13】一个真实项目出于 SEO 策略故意把 200+ 个内容页从
+ * `sitemap.xml` 里排除（只留分类页），`--sitemap` 只会测 sitemap 里的那几个
+ * URL，漏掉大头——这不是脚本的 bug，是"sitemap 只声明希望被收录的页面"
+ * 这条协议语义本身的结果。真正要测全站时，从站点自己的数据源（内容配置、
+ * 路由清单、CMS 导出等）另行生成完整 URL 清单，不能假设 sitemap 就是全站。
+ * 位置参数支持一次传多个 URL（`urls.push`，见上面的 CLI 解析），大站按
+ * 40 个左右一批用 `split -l 40` 分片、循环前台同步调用即可（每片几十秒，
+ * 不需要后台或等待）——不要一次性把几百个 URL 传进一次调用，也不要为了
+ * "跑得快"而后台化，前台分片跑完全程可控。
  */
 
 // ─── CLI ────────────────────────────────────────────────────────────────────
