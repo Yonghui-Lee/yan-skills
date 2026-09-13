@@ -12,7 +12,18 @@
  * 扫描由 Ora AI 执行。**报告 API 只返回「最新已存在的报告」，本脚本没有强制重扫**：
  * 2026-09-03 实测同一域名相隔 11 天两次调用仍拿到同一份旧报告（不是 6 小时缓存）。
  * 要新报告得由用户在 is-agentic.com 上手动触发重扫，跑完再来 `scan --save`；判读时看报告里的
- * 时间戳，不看本次调用时间。
+ * 时间戳，不看本次调用时间。**`scan`/`diff` 现在会在报告时间戳明显早于最近改动
+ * 时打一条醒目警告**（判据是 `scanned_at` 距今超过阈值，见 `isReportStale`），
+ * 免得把缓存分当成本次改动的真实结果——两个真实项目都复盘过这个坑：一次是
+ * CLI 拿到 76 分的缓存旧报告，浏览器手动 Rescan 后变成 98 分，中间 22 分的差距
+ * 全部来自「没有重新测量」，不是真的退步。
+ *
+ * **手动 Rescan 有未公开的冷却时间**（2026-09-13 实测）：同一域名短时间内
+ * （约 25 分钟内点第 3 次）再点 Rescan，按钮会变灰、既不出现"Refreshing the
+ * report..."提示，也不产生新的 `scanned_at`——不确定具体冷却时长，本次两次
+ * 成功 rescan 间隔约 22 分钟。规划多轮验证同一个站点的分数变化时，两次 Rescan
+ * 之间预留至少 30 分钟，不要指望连续改两次代码就能连续拿到两次全新分数；
+ * 分数没变时先怀疑是不是撞了冷却窗口，再怀疑修复本身无效。
  *
  * ── 第三波（2026-08-30）两条改动 ──────────────────────────────────────────
  *
@@ -29,7 +40,9 @@
  * 已验证：2026-08-22
  */
 import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve as resolvePath } from "node:path";
+import { realpath } from "node:fs/promises";
+import { pathToFileURL } from "node:url";
 import { execSync } from "node:child_process";
 
 const API = "https://is-agentic.com/api/v1/report";
@@ -175,6 +188,21 @@ async function fetchReport(domain, projectRoot) {
 
 // ── 报告格式化 ────────────────────────────────────────────────────────────
 
+// 默认阈值 24 小时：is-agentic 的报告 API 没有强制重扫能力（见文件头），报告
+// 时间戳一旦落后于最近一次改动，分数就是"改动前"的快照，不是"改动后"的结果。
+// 纯函数，可脱离网络单测；`now` 可注入用于测试固定时间点。
+export const DEFAULT_STALE_HOURS = 24;
+export function isReportStale(scannedAt, now = new Date(), thresholdHours = DEFAULT_STALE_HOURS) {
+  // `new Date(null)` 会被当成 0（epoch），不是"解析失败"——但这里语义上是
+  // "没有给时间戳"，不该被判成一个真实的、极端陈旧的日期，所以 null/undefined/
+  // 空字符串一律先归为"解析不出"，不进 Date 构造函数。
+  if (scannedAt === null || scannedAt === undefined || scannedAt === "") return false;
+  const scannedMs = new Date(scannedAt).getTime();
+  const nowMs = now instanceof Date ? now.getTime() : new Date(now).getTime();
+  if (!Number.isFinite(scannedMs) || !Number.isFinite(nowMs)) return false; // 解析不出时间就不误报陈旧
+  return nowMs - scannedMs > thresholdHours * 3_600_000;
+}
+
 function printReport(report) {
   const { score, score_label, score_breakdown: sb, issues, scanned_at } = report;
   const domain = report.display_target;
@@ -182,6 +210,15 @@ function printReport(report) {
   console.log(`\n═══ ${domain} ═══`);
   console.log(`分数：${score}/100  ${score_label}`);
   console.log(`扫描时间：${new Date(scanned_at).toLocaleString("zh-CN")}`);
+  if (isReportStale(scanned_at)) {
+    const hoursAgo = Math.round((Date.now() - new Date(scanned_at).getTime()) / 3_600_000);
+    console.log(
+      `⚠️  这份报告距今约 ${hoursAgo} 小时——is-agentic 没有强制重扫能力，这可能是` +
+        `旧代码/旧内容的缓存分数，不代表你最近的改动。要拿到反映当前状态的真实分数：` +
+        `打开 ${REPORT_URL}/${domain} 手动点 Rescan，等新分数渲染出来（确认扫描时间戳变了）` +
+        `再重跑本命令。Rescan 有未公开的冷却时间，两次之间预留至少 30 分钟。`,
+    );
+  }
   console.log(`报告：${REPORT_URL}/${domain}`);
   console.log();
 
@@ -344,4 +381,19 @@ async function main() {
   }
 }
 
-main().catch(e => { console.error(e); process.exit(1); });
+// argv[1] 保留调用时写的路径，import.meta.url 已经过符号链接解析——两边取真实路径
+// 再比较，同 check-version.mjs 的 invokedAsScript()。让测试可以只 import 上面的
+// 纯函数（isReportStale）而不触发参数校验或真的网络请求。
+async function invokedAsScript() {
+  if (process.argv[1] === undefined) return false;
+  try {
+    const resolved = await realpath(resolvePath(process.argv[1]));
+    return pathToFileURL(resolved).href === import.meta.url;
+  } catch {
+    return false;
+  }
+}
+
+if (await invokedAsScript()) {
+  main().catch(e => { console.error(e); process.exit(1); });
+}
