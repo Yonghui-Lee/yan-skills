@@ -313,24 +313,30 @@ Skill 集合不一样，文档只保证「该用什么」；遇缺就跳过会�
 | `rankup init` 用完整清单初始化全部 ⬜ | 一开始就知道要做多少事，不靠记忆 | 忘了接 IndexNow，上线两个月没被 Bing 收录 |
 | 「不接」标 ❌ 并写裁决依据 | 区分「还没做」和「决定不做」 | AdSense 标 ⬜，每次 review 都催，其实早决定不挂广告 |
 
-已上线站点至少覆盖以下平台（`rankup review` 逐项验证；接入步骤见 [`search-platforms.md`](search-platforms.md) 与 [`analytics-platforms.md`](analytics-platforms.md)）：
+已上线站点至少覆盖以下平台（`rankup review` 逐项验证；接入步骤见 [`search-platforms.md`](search-platforms.md) 与 [`analytics-platforms.md`](analytics-platforms.md)）。前三行是批 A（域名无关，预览域即可接）；其余搜索/索引/外链/邮箱/受众忠诚度行是批 B（域名定稿后一次接完，顺序与粒度对齐 [`lifecycle.md`](lifecycle.md) 段 5「批 B 平台清单」与 [`checklists.md`](checklists.md) 段 5「批 B 清单逐行有状态」）：
 
 | 类别 | 平台 | 验证方式 |
 |---|---|---|
 | 托管方分析 | Cloudflare Web Analytics | `curl` 线上 HTML grep `cloudflareinsights` **只证明脚本在**；必须再用 GraphQL 查 `count > 0`（第八节那条事故） |
 | 产品分析 | GA4 | grep `gtag` 或 `googletagmanager` |
 | 行为分析 | Microsoft Clarity | grep `clarity.ms` |
-| 外链视角 | Ahrefs Site Explorer / Web Analytics / Site Audit | 后台查项目验证状态；grep `analytics.ahrefs.com`；Site Audit 有已完成的抓取 |
-| 搜索平台 | GSC、Bing Webmaster | 后台查验证 + sitemap 状态 |
-| 搜索平台 | Yandex、Naver | grep `yandex-verification` / `naver-site-verification` |
 | 索引推送 | IndexNow | `curl` 线上密钥文件 HTTP 200 |
+| 搜索平台 | Google Search Console（GSC） | 后台查验证 + sitemap 状态 |
+| 搜索平台 | Bing Webmaster | 后台查验证 + sitemap 状态 |
+| 搜索平台 | Yandex Webmaster | grep `yandex-verification`；爬虫 UA `YandexBot` |
+| 搜索平台 | Naver Search Advisor | grep `naver-site-verification`；爬虫 UA `Yeti` |
+| 外链视角 | Ahrefs Webmaster Tools（Ahrefs WA） | 后台查项目验证状态；grep `analytics.ahrefs.com` |
+| 站点体检 | Ahrefs Site Audit | 后台查有已完成的抓取；`ahrefs-site-audit.mjs report <id> <section>` |
 | 邮箱 | Cloudflare Email Routing `hello@` | 发一封测试邮件收到 |
+| 受众忠诚度 | Preferred Sources 引导按钮 | 人工核对页面已有引导按钮/组件 |
 | 品牌资产 | favicon / manifest / icons | `curl` 各路径 HTTP 200 |
 | SEO 元素 | title / description / robots / OG（含图） | grep 各标签，逐页 |
 | 结构化数据 | JSON-LD | grep `application/ld+json` |
 | AI 就绪度 | is-agentic | `is-agentic.mjs scan` |
 | 多语言 | hreflang / `<html lang>` | 仅多语言站点 |
 | 兜底 | 其他能带流量的平台 | 目标市场有本地引擎或本地站长工具就加一行，一个不漏 |
+
+**批 A/批 B 每个平台一行独立勾选，抄录时不得合并或省略；状态只能是 ✅（附证据）/❌（写裁决依据）/⏸（写卡点）/⬜，表头不得用『⬜=未在本文件核实』这类弱化口径，看板必须与 `checks.md` 同步。**
 
 ---
 

@@ -137,6 +137,127 @@ const LIFECYCLE_CHECKS = [
   },
 ];
 
+// 批 A / 批 B 必需平台的逐行检查：判据来自 discipline.md 十「完整清单」、
+// checklists.md 段 5「批 B 清单逐行有状态」、lifecycle.md 段 5「批 B 平台清单」——
+// 三处口径一致，这里只是把它断言成脚本，不是又开一份新判据。
+// 上面 LIFECYCLE_CHECKS 里的 "integrations" 只判"文件在不在、够不够大"；
+// 曾经出现过文件存在、体积也够，但整整两个必需平台（Ahrefs Site Audit、Yandex）
+// 从未单独成行的情况——那种缺口只有把表格逐行摊开才看得见。
+// 别名做宽松匹配（大小写不敏感、常见简称/长写法），因为项目侧抄录这张清单时
+// 措辞不会跟本文件的中文平台名逐字一致。
+const REQUIRED_INTEGRATION_PLATFORMS = [
+  { id: "cf-web-analytics", batch: "A", name: "Cloudflare Web Analytics", aliases: ["cloudflare web analytics", "cf web analytics", "cf wa"] },
+  { id: "ga4", batch: "A", name: "GA4", aliases: ["ga4", "google analytics"] },
+  { id: "clarity", batch: "A", name: "Microsoft Clarity", aliases: ["microsoft clarity", "clarity"] },
+  { id: "indexnow", batch: "B", name: "IndexNow", aliases: ["indexnow"] },
+  { id: "gsc", batch: "B", name: "Google Search Console", aliases: ["google search console", "gsc"] },
+  { id: "bing", batch: "B", name: "Bing Webmaster", aliases: ["bing webmaster", "bing"] },
+  { id: "yandex", batch: "B", name: "Yandex Webmaster", aliases: ["yandex webmaster", "yandex"] },
+  { id: "naver", batch: "B", name: "Naver Search Advisor", aliases: ["naver search advisor", "naver"] },
+  {
+    id: "ahrefs-wa",
+    batch: "B",
+    name: "Ahrefs Webmaster Tools（Ahrefs WA）",
+    aliases: ["ahrefs webmaster tools", "ahrefs web analytics", "ahrefs wa", "ahrefs site explorer", "ahrefs awt"],
+  },
+  { id: "ahrefs-site-audit", batch: "B", name: "Ahrefs Site Audit", aliases: ["ahrefs site audit"] },
+  { id: "email-routing", batch: "B", name: "Cloudflare Email Routing hello@", aliases: ["email routing", "hello@"] },
+  { id: "preferred-sources", batch: "B", name: "Preferred Sources 引导按钮", aliases: ["preferred sources", "preferred source"] },
+  { id: "fallback-platform", batch: "B", name: "兜底：其他能带流量的平台", aliases: ["兜底"], matchWholeRow: true },
+];
+
+const STATUS_GLYPHS = ["✅", "⬜", "❌", "⏸"];
+
+// integrations.md 是项目自己写的 markdown 表格，列顺序不保证一致——
+// 先找表头把"平台/状态/证据"列的下标定位出来，找不到表头就退化成整行做宽松匹配。
+function parseIntegrationsTable(text) {
+  let headerCells = null;
+  const rows = [];
+  for (const rawLine of text.split("\n")) {
+    const line = rawLine.trim();
+    if (!line.startsWith("|") || !line.endsWith("|")) continue;
+    const cells = line.slice(1, -1).split("|").map((cell) => cell.trim());
+    if (cells.length === 0) continue;
+    if (cells.every((cell) => /^:?-{2,}:?$/.test(cell))) continue; // |---|---| 分隔行
+    if (headerCells === null && cells.some((cell) => cell.includes("平台"))) {
+      headerCells = cells;
+      continue;
+    }
+    rows.push(cells);
+  }
+  return { headerCells, rows };
+}
+
+function findColumnIndex(headerCells, keyword) {
+  if (!headerCells) return -1;
+  return headerCells.findIndex((cell) => cell.includes(keyword));
+}
+
+// 单个平台在弱证据判定里,"-"/"—"/"无"/"n/a" 这类占位符视同空,不算真的留了证据。
+function looksLikeEmptyEvidence(text) {
+  return !text || /^[\s\-—–无]*$|^n\/?a$/i.test(text.trim());
+}
+
+function checkIntegrationRows(text) {
+  const { headerCells, rows } = parseIntegrationsTable(text);
+  const platformIdx = findColumnIndex(headerCells, "平台");
+  const statusIdx = findColumnIndex(headerCells, "状态");
+  const evidenceIdx = findColumnIndex(headerCells, "证据");
+
+  const gaps = [];
+  for (const platform of REQUIRED_INTEGRATION_PLATFORMS) {
+    const matchRow = rows.find((cells) => {
+      // "兜底"这一行的"平台"列内容按目标市场变化（日本填 Yahoo! JAPAN、韩国填 Daum……），
+      // 不是固定平台名，所以它按整行匹配"兜底"这个类别词，其余平台仍只认平台列。
+      const haystack = (
+        platform.matchWholeRow || platformIdx < 0 ? cells.join(" ") : (cells[platformIdx] ?? "")
+      ).toLowerCase();
+      return platform.aliases.some((alias) => haystack.includes(alias));
+    });
+
+    if (!matchRow) {
+      gaps.push({
+        id: platform.id,
+        batch: platform.batch,
+        name: platform.name,
+        issue: "missing-row",
+        detail: "看板里没有这一行（对照 discipline.md 十，逐行独立，不许合并或省略）",
+      });
+      continue;
+    }
+
+    const statusCell = statusIdx >= 0 ? (matchRow[statusIdx] ?? "") : matchRow.join(" ");
+    const glyph = STATUS_GLYPHS.find((candidate) => statusCell.includes(candidate));
+
+    if (!glyph || glyph === "⬜") {
+      gaps.push({
+        id: platform.id,
+        batch: platform.batch,
+        name: platform.name,
+        issue: "blank-status",
+        detail: "状态是 ⬜（待做）或没有可识别的状态标记，还不能算已核实",
+      });
+      continue;
+    }
+
+    if (glyph === "✅") {
+      const evidenceCell = evidenceIdx >= 0 ? (matchRow[evidenceIdx] ?? "") : "";
+      const inlineEvidence = statusCell.replace(glyph, "").trim();
+      const evidence = evidenceCell || inlineEvidence;
+      if (looksLikeEmptyEvidence(evidence)) {
+        gaps.push({
+          id: platform.id,
+          batch: platform.batch,
+          name: platform.name,
+          issue: "weak-evidence",
+          detail: "标了 ✅ 但证据列是空的，不采信勾",
+        });
+      }
+    }
+  }
+  return gaps;
+}
+
 function parseArgs(argv) {
   const options = { projectRoot: process.cwd(), days: 30, json: false };
   for (let index = 0; index < argv.length; index += 1) {
@@ -227,7 +348,28 @@ async function checkLifecycle(rankupDir) {
     }
     results.push({ ...check, done });
   }
-  return { checks: results, looksLive };
+
+  // 批 B（域名相关的接入）只在项目已经定稿域名时才要求——判断方式仿照上面 looksLive
+  // 的做法：不猜"是不是上线了"，只看 infrastructure.md 这份记录域名/zone/部署信息的
+  // 文件是不是已经有实质内容（阈值与 LIFECYCLE_CHECKS 里 "infrastructure" 那条一致），
+  // 没有就说明域名还没定稿，批 B 逐行检查在这个阶段全部跳过、不报错。
+  const domainFinalized = (await fileBytes(path.join(rankupDir, "infrastructure.md"))) >= 50;
+
+  let integrationGaps = [];
+  if (looksLive) {
+    try {
+      const integrationsText = await readFile(path.join(rankupDir, "integrations.md"), "utf8");
+      integrationGaps = checkIntegrationRows(integrationsText).filter(
+        (gap) => gap.batch === "A" || domainFinalized,
+      );
+    } catch {
+      // integrations.md 读不到:上面的 "integrations" 文件级检查已经会报这个缺口,
+      // 这里不重复报,避免同一件事在报告里出现两次。
+      integrationGaps = [];
+    }
+  }
+
+  return { checks: results, looksLive, domainFinalized, integrationGaps };
 }
 
 // 记录是否落后于代码:有提交而记忆没动,就是漂移信号。滞后指标不能当进度依据。
@@ -387,7 +529,7 @@ function renderText(report, days) {
   }
 
   // 生命周期检查点
-  const { checks: lcChecks, looksLive } = report.lifecycle;
+  const { checks: lcChecks, looksLive, integrationGaps, domainFinalized } = report.lifecycle;
   if (lcChecks.length > 0) {
     const missing = lcChecks.filter((c) => !c.done);
     const passed = lcChecks.filter((c) => c.done);
@@ -436,6 +578,30 @@ function renderText(report, days) {
 
     if (passed.length > 0) {
       lines.push("已完成：" + passed.map((c) => c.name).join("、"), "");
+    }
+  }
+
+  // 接入看板逐行核对：上面的 "integrations" 检查点只看文件在不在、够不够大，
+  // 这里把批 A/批 B 每个必需平台摊开逐行判——行缺失、状态还是 ⬜、
+  // 或者标了 ✅ 但证据列是空的，三类缺口分开报。
+  if (looksLive) {
+    lines.push(
+      `## 接入看板逐行核对（批 A${domainFinalized ? " + 批 B" : "，批 B 待域名定稿后再查"}）`,
+      "",
+    );
+    if (integrationGaps.length === 0) {
+      lines.push(
+        "✓ 批 A" +
+          (domainFinalized ? "/批 B" : "") +
+          " 必需平台逐行核对无缺口（行都在、状态非 ⬜、✅ 都有证据——文件层面而言；线上是否真的接了仍需 `rankup review` 实测）。",
+        "",
+      );
+    } else {
+      lines.push("| 平台 | 批次 | 缺口 |", "|---|---|---|");
+      for (const gap of integrationGaps) {
+        lines.push(`| ${gap.name} | 批 ${gap.batch} | ${gap.detail} |`);
+      }
+      lines.push("");
     }
   }
 

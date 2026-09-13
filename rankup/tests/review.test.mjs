@@ -133,3 +133,99 @@ test("空的经验库不报格式异常", async () => {
     assert.equal(report.experience.malformed, false);
   });
 });
+
+// 接入看板逐行核对:回归 discipline.md 十 / checklists.md 段 5「批 B 清单逐行有状态」/
+// lifecycle.md 段 5「批 B 平台清单」三处判据曾经对不上执行链路的那次事故——
+// integrations.md 文件存在且体积够,但 Ahrefs Site Audit 从未单独成行、Yandex 整行缺失,
+// 旧版 review.mjs 只判"文件在不在"看不出这种缺口。
+
+const FULL_INTEGRATIONS_TABLE = [
+  "| 类别 | 平台 | 状态 | 证据 / 原因 | 日期 |",
+  "|---|---|---|---|---|",
+  "| 托管方分析 | Cloudflare Web Analytics | ✅ | site tag `abc123`，数据流状态条显示正在接收 | 2026-09-10 |",
+  "| 产品分析 | GA4 | ✅ | property `G-XXXX1` | 2026-09-10 |",
+  "| 行为分析 | Microsoft Clarity | ✅ | project id `clarity-1` | 2026-09-10 |",
+  "| 索引推送 | IndexNow | ✅ | 密钥文件校验通过，推送 12 条 HTTP 200 | 2026-09-11 |",
+  "| 搜索平台 | Google Search Console | ✅ | 网域资源已验证，sitemap 已提交 | 2026-09-11 |",
+  "| 搜索平台 | Bing Webmaster | ✅ | sitemap 提交状态成功 | 2026-09-11 |",
+  "| 搜索平台 | Yandex Webmaster | ✅ | HTML meta 验证通过 | 2026-09-11 |",
+  "| 搜索平台 | Naver Search Advisor | ✅ | HTML meta 验证通过 | 2026-09-11 |",
+  "| 外链视角 | Ahrefs Webmaster Tools（Ahrefs WA） | ✅ | 项目 id 12345678 | 2026-09-12 |",
+  "| 站点体检 | Ahrefs Site Audit | ✅ | 抓取已完成，0 严重问题 | 2026-09-12 |",
+  "| 邮箱 | Cloudflare Email Routing hello@ | ✅ | 转发规则已建，测试邮件已收到 | 2026-09-12 |",
+  "| 受众忠诚度 | Preferred Sources 引导按钮 | ✅ | 引导组件已上线 | 2026-09-12 |",
+  "| 兜底 | 其他能带流量的平台 | ❌ | 目标市场仅英语，裁决为不需要额外引擎 | 2026-09-12 |",
+].join("\n");
+
+test("批 A/批 B 齐全且逐行有证据时不报接入缺口", async () => {
+  await withProject(async (root) => {
+    await seed(root, {
+      "infrastructure.md": "zone: example-good.com 已定稿域名，Cloudflare 托管，2026-09-01 绑定生效\n",
+      "integrations.md": FULL_INTEGRATIONS_TABLE,
+    });
+    const report = JSON.parse(runReview(root, ["--json"]).stdout);
+    assert.deepEqual(report.lifecycle.integrationGaps, []);
+    assert.equal(report.lifecycle.domainFinalized, true);
+  });
+});
+
+test("缺 Yandex 整行、Ahrefs Site Audit 仍是 ⬜ 时报出这两条缺口", async () => {
+  await withProject(async (root) => {
+    const rows = FULL_INTEGRATIONS_TABLE.split("\n").filter(
+      (line) => !line.includes("Yandex Webmaster"),
+    );
+    const withBlankSiteAudit = rows.map((line) =>
+      line.includes("Ahrefs Site Audit")
+        ? "| 站点体检 | Ahrefs Site Audit | ⬜ | | |"
+        : line,
+    );
+    await seed(root, {
+      "infrastructure.md": "zone: example-bad.com 已定稿域名，Cloudflare 托管\n",
+      "integrations.md": withBlankSiteAudit.join("\n"),
+    });
+    const report = JSON.parse(runReview(root, ["--json"]).stdout);
+    const ids = report.lifecycle.integrationGaps.map((gap) => gap.id).sort();
+    assert.deepEqual(ids, ["ahrefs-site-audit", "yandex"]);
+    const siteAudit = report.lifecycle.integrationGaps.find((gap) => gap.id === "ahrefs-site-audit");
+    assert.equal(siteAudit.issue, "blank-status");
+    const yandex = report.lifecycle.integrationGaps.find((gap) => gap.id === "yandex");
+    assert.equal(yandex.issue, "missing-row");
+    assert.match(runReview(root).stdout, /Ahrefs Site Audit/);
+  });
+});
+
+test("标 ✅ 但证据列是空的被判为弱证据，不是通过", async () => {
+  await withProject(async (root) => {
+    await seed(root, {
+      "infrastructure.md": "zone: example-weak.com 已定稿域名\n",
+      "integrations.md": [
+        "| 类别 | 平台 | 状态 | 证据 / 原因 | 日期 |",
+        "|---|---|---|---|---|",
+        "| 托管方分析 | Cloudflare Web Analytics | ✅ | | |",
+      ].join("\n"),
+    });
+    const report = JSON.parse(runReview(root, ["--json"]).stdout);
+    const gap = report.lifecycle.integrationGaps.find((g) => g.id === "cf-web-analytics");
+    assert.ok(gap, "空证据的 ✅ 应该被报出来");
+    assert.equal(gap.issue, "weak-evidence");
+  });
+});
+
+test("域名未定稿（没有 infrastructure.md）时批 B 不报错，只查批 A", async () => {
+  await withProject(async (root) => {
+    await seed(root, {
+      "integrations.md": [
+        "| 类别 | 平台 | 状态 | 证据 / 原因 | 日期 |",
+        "|---|---|---|---|---|",
+        "| 托管方分析 | Cloudflare Web Analytics | ✅ | site tag abc | 2026-09-01 |",
+        "| 产品分析 | GA4 | ⬜ | | |",
+        "| 行为分析 | Microsoft Clarity | ✅ | project id clarity-1 | 2026-09-01 |",
+      ].join("\n"),
+    });
+    const report = JSON.parse(runReview(root, ["--json"]).stdout);
+    assert.equal(report.lifecycle.domainFinalized, false);
+    const ids = report.lifecycle.integrationGaps.map((gap) => gap.id);
+    assert.deepEqual(ids, ["ga4"]);
+    assert.ok(!ids.includes("yandex") && !ids.includes("ahrefs-site-audit"));
+  });
+});
