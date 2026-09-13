@@ -26,12 +26,36 @@
  * 非规范 host）背后共同的根因。一次修好协议+host，比逐条排查每个症状便宜得多。
  *
  * check-redirects 只读（GET only，不改任何配置），查看 Always Use HTTPS 现状与
- * 已存在的 dynamic redirect 规则；apply-redirects 是写操作，会立刻打开 Always Use
- * HTTPS，并覆盖式替换整个 http_request_dynamic_redirect phase 入口的规则集（PUT
- * 是幂等替换，不是追加，所以不需要先建 ruleset 再改）。`--to` 必须显式指定 www
- * 或 apex，不设默认值——方向是意图声明，不能靠猜。
+ * 已存在的 dynamic redirect 规则；apply-redirects 是写操作，会打开 Always Use
+ * HTTPS（已是 on 则跳过 PATCH），并 upsert 本脚本管理的那一条重定向规则。`--to`
+ * 必须显式指定 www 或 apex，不设默认值——方向是意图声明，不能靠猜。
  *
- * 四个已验证的坑（2026-09-13，两个真实项目分别复盘）：
+ * ── 事故与修复（2026-09-13，独立验收发现）：PUT 曾经是整表覆盖，会吞掉别人的规则 ──
+ *
+ * 该 phase 入口的 PUT 接口本身就是"整份替换"语义（Cloudflare 没有对单条规则的
+ * PATCH/追加接口），旧版直接拿 `buildWwwToApexRedirectRule` 的结果去 PUT，等于
+ * 用只有一条规则的数组覆盖掉 zone 里这个 phase 下**全部**已有规则——如果这个
+ * zone 上已经手工配了别的重定向（哪怕跟 www/apex 毫无关系），会被静默删除。
+ *
+ * 现在的流程是"读-改-写"：先 GET 现有 ruleset，用规则上的稳定标记 `ref`
+ * （`MANAGED_REDIRECT_REF` 常量）识别哪一条是本脚本自己管理的，PUT 前把它跟
+ * 读到的其余规则合并——非本脚本的规则原样保留、只 upsert 自己那一条（`ref`
+ * 命中就地替换，没有则追加到末尾）。合并逻辑与冲突判定是纯函数
+ * （`mergeManagedRedirectRule` / `conflictsWithManagedRedirect`），可以脱离网络
+ * 单测；测试用假 `fetch` 覆盖三个场景：已有他人规则被保留、目标与现状已一致时
+ * 跳过 PUT、检测到冲突时拒写并非零退出。
+ *
+ * 冲突判定：既有规则不是本脚本管理（没有匹配的 `ref`），但 expression 里出现了
+ * 这次要跳转的 fromHost/toHost 中任意一个——说明它也在处理同一对 host 之间的
+ * 重定向，语义上大概率会跟本脚本要写的规则打架。默认遇到冲突就报告详情、
+ * 非零退出、不写入；显式传 `--force-replace` 才会把冲突规则一并替换掉。
+ *
+ * `--dry-run`：只做只读的 GET（zone、Always Use HTTPS、ruleset），打印将要做的
+ * 变更摘要（跳过 / PATCH https / upsert 规则，以及会不会有冲突），不发任何
+ * PATCH/PUT。换新账号或不确定现状时，建议先 `check-redirects` 再
+ * `apply-redirects --dry-run`，确认无误后去掉 `--dry-run` 再跑一次。
+ *
+ * 四个已验证的坑（2026-09-13，两个真实项目分别复盘，构造 rule 本身的部分依然适用）：
  *   1. target_url 的 expression **不支持 if()**——Cloudflare 的 wirefilter 表达式
  *      语法会报 `unknown identifier`。查询串保留与否交给同级的
  *      `preserve_query_string` 参数处理，不要在 expression 里手写判空逻辑。
@@ -60,7 +84,9 @@
  * API/端点/body 形状）分别跑通「已有 entrypoint、覆盖式更新」与「从零创建
  * entrypoint」两条路径，脚本按那两次手工调用的确切请求复刻；换新账号第一次用
  * apply-redirects 时建议先 check-redirects 核对现状，执行后也再 check-redirects
- * 一次确认。
+ * 一次确认。"读-改-写"合并逻辑（2026-09-13 独立验收后新增）：单测用假 fetch 覆盖，
+ * 未在真实账号上验证过写路径本身——按上面的建议顺序（check-redirects →
+ * apply-redirects --dry-run → 去掉 --dry-run）自己核验一遍再信任它。
  */
 import { readFileSync, existsSync } from "node:fs"
 import { join } from "node:path"
@@ -132,8 +158,25 @@ function reportZone(z) {
 /* ── 纯函数：重定向规则构造与状态判定（可脱离网络单测） ──────────── */
 
 /**
- * 构造「www ⇄ 裸域」一跳到位的 301 重定向规则——PUT 整个
- * http_request_dynamic_redirect phase 入口时要用的 rules 数组（纯构造，不发请求）。
+ * 本脚本管理的重定向规则的稳定标记。写在规则的 `ref` 字段上——Cloudflare
+ * rulesets 的 `ref` 就是设计给"跨请求识别同一条规则"用的，比拿 description
+ * 文案做字符串匹配更不容易被人手改描述文案后失效。长度/字符集须满足 CF 的
+ * ref 约束（字母数字下划线，这里选的值符合）。
+ *
+ * apply-redirects 靠这个标记把 ruleset 里"哪条是我管的"和"哪条是别人的"
+ * 区分开——upsert 只动前者，后者原样保留（见下面 mergeManagedRedirectRule）。
+ */
+export const MANAGED_REDIRECT_REF = "rankup_www_apex_redirect"
+
+/** 一条规则是否是本脚本管理的那条（靠 `ref` 标记判定，见 MANAGED_REDIRECT_REF）。 */
+export function isManagedRedirectRule(rule) {
+  return Boolean(rule) && rule.ref === MANAGED_REDIRECT_REF
+}
+
+/**
+ * 构造「www ⇄ 裸域」一跳到位的 301 重定向规则——upsert 进
+ * http_request_dynamic_redirect phase 入口时要用的单条规则（纯构造，不发请求）。
+ * 带上 MANAGED_REDIRECT_REF，供 mergeManagedRedirectRule 识别与就地替换。
  *
  * direction "apex"：把 www.<domain> 重定向到裸域 <domain>（真实项目验证过的那套配置）。
  * direction "www"：镜像方向，把裸域 <domain> 重定向到 www.<domain>。
@@ -155,6 +198,7 @@ export function buildWwwToApexRedirectRule(domain, direction) {
   const toHost = direction === "apex" ? domain : `www.${domain}`
   return [
     {
+      ref: MANAGED_REDIRECT_REF,
       action: "redirect",
       action_parameters: {
         from_value: {
@@ -181,6 +225,129 @@ export function isAlwaysUseHttpsOn(settingValue) {
   if (typeof settingValue === "string") return settingValue === "on"
   if (settingValue && typeof settingValue === "object") return settingValue.value === "on"
   return false
+}
+
+/**
+ * 把本脚本管理的那条规则 upsert 进既有规则数组：`ref` 命中就地替换（保持原
+ * 位置，不影响既有规则的相对顺序——顺序在 wirefilter 里是第一条匹配生效，
+ * 挪动位置可能改变行为，不能因为"重建一遍更省事"就打乱），没有则追加到末尾。
+ * 既有数组里所有非本脚本的规则原样透传，一个字段都不动。纯函数，不发请求。
+ */
+export function mergeManagedRedirectRule(existingRules, managedRule) {
+  const rules = Array.isArray(existingRules) ? existingRules : []
+  const index = rules.findIndex((rule) => isManagedRedirectRule(rule))
+  if (index === -1) return [...rules, managedRule]
+  const next = [...rules]
+  next[index] = managedRule
+  return next
+}
+
+/** host 是否作为完整的域名 token 出现在 haystack 里——不是裸的 substring 包含。
+ * 域名合法字符是字母数字与 `.`/`-`，所以拿这三类字符之外的任何字符（或
+ * 字符串首尾）当边界：这样 "example.com" 不会误命中 "blog.example.com"
+ * 里的那一段（前一个字符是合法域名字符 `.`，不算边界），但能命中
+ * `http.host eq "example.com"` 或 `concat("https://www.example.com", ...)`
+ * 这类被引号/斜杠/开头结尾包住的场景。 */
+function hostAppearsIn(haystack, host) {
+  const escaped = host.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+  const boundary = "(?:^|[^A-Za-z0-9.-])"
+  return new RegExp(`${boundary}${escaped}(?:$|[^A-Za-z0-9.-])`).test(haystack)
+}
+
+/**
+ * 判断一条既有的、非本脚本管理的规则是否与这次要写的方向冲突——即它的
+ * expression 里也出现了 fromHost 或 toHost（说明它也在处理同一对 host 之间的
+ * 重定向/改写，语义上大概率会跟本脚本要 upsert 的规则打架，谁先匹配生效
+ * 取决于数组顺序，贸然共存很容易外表看着都配了、线上却只有一条生效）。
+ * 按完整 host token 匹配（见 hostAppearsIn），不解析 wirefilter 语法——宁可
+ * 保守多报一个"疑似冲突"交给人判断，也不要因为解析漏判而静默共存两条
+ * 互相打架的规则；但也不能粗暴到拿 "example.com" 去 substring 匹配
+ * "blog.example.com" 这种其实无关的子域名规则，那会把大量无关规则误判成冲突。
+ * 本脚本自己管理的那条永远不算冲突（它是 upsert 的目标，不是别人的规则）。
+ */
+export function conflictsWithManagedRedirect(rule, domain, direction) {
+  if (!rule || isManagedRedirectRule(rule)) return false
+  const fromHost = direction === "apex" ? `www.${domain}` : domain
+  const toHost = direction === "apex" ? domain : `www.${domain}`
+  const haystack = `${rule.expression || ""} ${JSON.stringify(rule.action_parameters || {})}`
+  return hostAppearsIn(haystack, fromHost) || hostAppearsIn(haystack, toHost)
+}
+
+/** 规则里由本脚本控制的字段取一份规范化快照，用于比较"现状是否已经等于目标"。
+ * 不比较 CF 服务端附加的 `id`/`last_updated`/`version` 等只读字段——那些字段
+ * 会在每次读回时变化，如果拿它们参与比较，"已一致"永远判不成立，PUT 会被
+ * 误判成"还需要写"而失去幂等的意义。 */
+function redirectRuleSignature(rule) {
+  if (!rule) return null
+  return JSON.stringify({
+    ref: rule.ref,
+    action: rule.action,
+    expression: rule.expression,
+    description: rule.description,
+    enabled: rule.enabled,
+    action_parameters: rule.action_parameters,
+  })
+}
+
+/** 既有规则数组里本脚本管理的那条，是否已经和目标规则完全一致（幂等判定）。 */
+export function isManagedRuleUpToDate(existingRules, desiredRule) {
+  const existing = (Array.isArray(existingRules) ? existingRules : []).find((rule) => isManagedRedirectRule(rule))
+  return redirectRuleSignature(existing) === redirectRuleSignature(desiredRule)
+}
+
+/** apply-redirects 遇到冲突且没传 --force-replace 时抛出的错误类型——由调用方
+ * （main）捕获后打印详情、非零退出；doApplyRedirects 本身不调用 process.exit，
+ * 这样它可以在单测里被直接调用而不会把测试进程一起终止。 */
+export class RedirectConflictError extends Error {
+  constructor(message, conflicts) {
+    super(message)
+    this.name = "RedirectConflictError"
+    this.conflicts = conflicts
+  }
+}
+
+/**
+ * 计算 apply-redirects 这次要做的事——纯函数，不发请求，方便单测直接断言
+ * "已有他人规则被保留 / 已一致跳过 / 冲突拒写"这三种场景各自的计划是否正确，
+ * 不需要每个场景都套一遍假 fetch。
+ *
+ * @param {object} input
+ * @param {string} input.domain
+ * @param {"www"|"apex"} input.direction
+ * @param {Array} input.existingRules  GET 回来的现有规则数组（ruleset 不存在时传 []）
+ * @param {boolean} input.httpsAlreadyOn
+ * @param {boolean} input.forceReplace
+ * @returns {{
+ *   desiredRule: object,
+ *   conflicts: Array,
+ *   blocked: boolean,
+ *   patchHttps: boolean,
+ *   writeRuleset: boolean,
+ *   nextRules: Array|null,
+ * }}
+ */
+export function planApplyRedirects({ domain, direction, existingRules, httpsAlreadyOn, forceReplace }) {
+  const rules = Array.isArray(existingRules) ? existingRules : []
+  const desiredRule = buildWwwToApexRedirectRule(domain, direction)[0]
+  const conflicts = rules.filter((rule) => conflictsWithManagedRedirect(rule, domain, direction))
+  const blocked = conflicts.length > 0 && !forceReplace
+
+  if (blocked) {
+    return { desiredRule, conflicts, blocked, patchHttps: !httpsAlreadyOn, writeRuleset: false, nextRules: null }
+  }
+
+  const kept = rules.filter((rule) => !conflicts.includes(rule))
+  const rulesetUpToDate = conflicts.length === 0 && isManagedRuleUpToDate(rules, desiredRule)
+  const nextRules = rulesetUpToDate ? null : mergeManagedRedirectRule(kept, desiredRule)
+
+  return {
+    desiredRule,
+    conflicts,
+    blocked: false,
+    patchHttps: !httpsAlreadyOn,
+    writeRuleset: !rulesetUpToDate,
+    nextRules,
+  }
 }
 
 /* ── 命令 ─────────────────────────────────────────────────── */
@@ -226,10 +393,16 @@ async function doCheckRedirects(domain) {
 }
 
 /**
- * apply-redirects：写操作，执行后立刻生效，不是只读预览。
+ * apply-redirects：写操作（除非 --dry-run），执行后立刻生效，不是只读预览。
  * --to 必须显式给 www 或 apex，不接受裸调用、没有默认值——方向是意图声明，不能靠猜。
+ *
+ * 流程是"读-改-写"（详见文件头注释「事故与修复」）：GET 现有 ruleset → 用
+ * planApplyRedirects（纯函数）算出这次真正要做什么 → 有冲突且未传
+ * --force-replace 时抛 RedirectConflictError，不发任何 PATCH/PUT，由调用方
+ * （main）捕获后非零退出 → 打印变更摘要 → --dry-run 到此为止 → 否则只对
+ * "计划判定确实需要写"的那部分发请求，已经与目标一致的部分跳过（幂等）。
  */
-async function doApplyRedirects(domain, direction) {
+export async function doApplyRedirects(domain, direction, { forceReplace = false, dryRun = false } = {}) {
   if (direction !== "apex" && direction !== "www") {
     console.error(`必须显式指定方向：--to www 或 --to apex（不接受裸调用，也没有默认值）
   --to apex   把 www.${domain} 重定向到裸域 ${domain}
@@ -238,31 +411,82 @@ async function doApplyRedirects(domain, direction) {
   }
 
   const zone = await findZoneOrDie(domain)
-  const httpsBody = { value: "on" }
-  // 【实测坑，2026-09-13，另一真实项目复盘】entrypoint 端点的 PUT body 只认
-  // name / description / rules 三个字段——kind / phase 是只读的、由 URL 决定，
-  // 照抄 GET 响应的完整字段回填会被拒绝（`invalid JSON: unknown field "kind"`）。
-  // 反过来，zone 此前从未配置过这个 phase 时（GET 报 `could not find entrypoint
-  // ruleset`），PUT 必须带 name/description 才能建成功，光传 { rules: [...] }
-  // 在"从零创建"这条路径上不可靠，所以两个字段固定带上，不依赖是否已存在。
-  const rulesetBody = { name: "default", description: "", rules: buildWwwToApexRedirectRule(domain, direction) }
 
-  console.log(`── 即将对 ${domain}（zone ${zone.id}）执行写操作，立刻生效 ──\n`)
-  console.log(`PATCH /zones/${zone.id}/settings/always_use_https`)
-  console.log(JSON.stringify(httpsBody, null, 2))
-  console.log()
-  console.log(`PUT /zones/${zone.id}/rulesets/phases/http_request_dynamic_redirect/entrypoint`)
-  console.log(JSON.stringify(rulesetBody, null, 2))
+  const httpsSetting = await cf(`/zones/${zone.id}/settings/always_use_https`)
+  const httpsAlreadyOn = isAlwaysUseHttpsOn(httpsSetting)
+
+  let ruleset = null
+  try {
+    ruleset = await cf(`/zones/${zone.id}/rulesets/phases/http_request_dynamic_redirect/entrypoint`)
+  } catch {
+    ruleset = null // 该 phase 从未配置过规则时 CF 对这个 GET 直接返回失败，视同「不存在」，走从零创建路径
+  }
+  const existingRules = ruleset?.rules ?? []
+
+  const plan = planApplyRedirects({ domain, direction, existingRules, httpsAlreadyOn, forceReplace })
+
+  if (plan.blocked) {
+    const fromHost = direction === "apex" ? `www.${domain}` : domain
+    const toHost = direction === "apex" ? domain : `www.${domain}`
+    const detail = [
+      `✋ 检测到 ${plan.conflicts.length} 条与目标方向冲突的既有规则——不是本脚本管理的（没有匹配的 ref），` +
+        `但 expression 里出现了 ${fromHost} 或 ${toHost}，可能也在处理这对 host 之间的重定向：`,
+      ...plan.conflicts.flatMap((rule) => [
+        `  - description: ${rule.description || "(无)"}`,
+        `    expression:  ${rule.expression}`,
+      ]),
+      ``,
+      `拒绝覆盖，不发任何 PATCH/PUT。确认要用本脚本的规则替换它们，重新加 --force-replace 执行。`,
+    ].join("\n")
+    throw new RedirectConflictError(detail, plan.conflicts)
+  }
+
+  console.log(`── ${domain}（zone ${zone.id}）变更摘要 ──\n`)
+  console.log(
+    plan.patchHttps ? `Always Use HTTPS   将 PATCH 为 on（当前 off）` : `Always Use HTTPS   已是 on，跳过 PATCH`,
+  )
+  if (plan.writeRuleset) {
+    const otherCount = existingRules.filter((rule) => !isManagedRedirectRule(rule)).length
+    console.log(
+      `dynamic redirect    将 upsert 本脚本管理的规则（保留其余 ${otherCount} 条既有规则不动），` +
+        `写入后共 ${plan.nextRules.length} 条：`,
+    )
+    console.log(JSON.stringify(plan.desiredRule, null, 2))
+  } else {
+    console.log(`dynamic redirect    已与目标一致，跳过 PUT`)
+  }
   console.log()
 
-  await cf(`/zones/${zone.id}/settings/always_use_https`, {
-    method: "PATCH",
-    body: JSON.stringify(httpsBody),
-  })
-  await cf(`/zones/${zone.id}/rulesets/phases/http_request_dynamic_redirect/entrypoint`, {
-    method: "PUT",
-    body: JSON.stringify(rulesetBody),
-  })
+  if (dryRun) {
+    console.log(`（--dry-run：以上是计划，未发生任何写操作）`)
+    return
+  }
+
+  if (!plan.patchHttps && !plan.writeRuleset) {
+    console.log(`✅ 已与目标一致，无需变更。`)
+    return
+  }
+
+  if (plan.patchHttps) {
+    await cf(`/zones/${zone.id}/settings/always_use_https`, {
+      method: "PATCH",
+      body: JSON.stringify({ value: "on" }),
+    })
+  }
+  if (plan.writeRuleset) {
+    // 【实测坑，2026-09-13】entrypoint 端点的 PUT body 只认 name/description/rules
+    // 三个字段——kind/phase 是只读的、由 URL 决定，照抄 GET 响应的完整字段回填会被
+    // 拒绝（`invalid JSON: unknown field "kind"`）。反过来，zone 此前从未配置过这个
+    // phase 时（GET 报 `could not find entrypoint ruleset`），PUT 必须带
+    // name/description 才能建成功；已存在时沿用读回的 name/description，不用固定
+    // 字面量覆盖掉用户可能自己起的名字/说明。
+    const rulesetName = ruleset?.name ?? "default"
+    const rulesetDescription = ruleset?.description ?? ""
+    await cf(`/zones/${zone.id}/rulesets/phases/http_request_dynamic_redirect/entrypoint`, {
+      method: "PUT",
+      body: JSON.stringify({ name: rulesetName, description: rulesetDescription, rules: plan.nextRules }),
+    })
+  }
 
   console.log(`✅ 已应用。读回验证：\n`)
   const httpsAfter = await cf(`/zones/${zone.id}/settings/always_use_https`)
@@ -270,21 +494,24 @@ async function doApplyRedirects(domain, direction) {
   const rulesetAfter = await cf(`/zones/${zone.id}/rulesets/phases/http_request_dynamic_redirect/entrypoint`)
   console.log(`dynamic redirect ruleset   ${rulesetAfter.rules?.length || 0} 条规则：`)
   for (const r of rulesetAfter.rules || []) {
-    console.log(`  - ${r.description || "(无)"}: ${r.expression}`)
+    console.log(`  - ${r.description || "(无)"}${isManagedRedirectRule(r) ? "（本脚本管理）" : ""}: ${r.expression}`)
   }
 }
 
 function usage(toStderr) {
   const out = toStderr ? console.error : console.log
-  out(`用法: cf-zone-setup.mjs <status|create|check-redirects|apply-redirects> <domain> [--to <www|apex>]
+  out(`用法: cf-zone-setup.mjs <status|create|check-redirects|apply-redirects> <domain> [--to <www|apex>] [--force-replace] [--dry-run]
 
   status <domain>                查询是否已加入账号，打印 zone 状态与 NS
   create <domain>                创建 zone 并读回 NS
   check-redirects <domain>       只读核验 Always Use HTTPS 与 dynamic redirect ruleset 现状
-  apply-redirects <domain> --to <www|apex>
-                                  写操作，立刻生效：打开 Always Use HTTPS，并建一条一跳
-                                  到位的 301 重定向规则。--to apex 把 www 收敛到裸域，
-                                  --to www 收敛到 www 子域。必须显式指定，没有默认值。`)
+  apply-redirects <domain> --to <www|apex> [--force-replace] [--dry-run]
+                                  打开 Always Use HTTPS（已是 on 则跳过），并 upsert 本脚本
+                                  管理的一条一跳到位 301 重定向规则——只读-改-写，保留 zone 里
+                                  其余既有规则不动。--to apex 把 www 收敛到裸域，--to www 收敛
+                                  到 www 子域，必须显式指定，没有默认值。已与目标一致时跳过写；
+                                  检测到冲突的既有规则时拒写并非零退出，加 --force-replace 才会
+                                  替换掉冲突规则。--dry-run 只读，打印变更摘要，不发任何写请求。`)
 }
 
 async function main() {
@@ -304,7 +531,17 @@ async function main() {
   if (cmd === "apply-redirects") {
     const toIdx = argv.indexOf("--to")
     const direction = toIdx >= 0 ? argv[toIdx + 1] : undefined
-    await doApplyRedirects(domain, direction)
+    const forceReplace = argv.includes("--force-replace")
+    const dryRun = argv.includes("--dry-run")
+    try {
+      await doApplyRedirects(domain, direction, { forceReplace, dryRun })
+    } catch (e) {
+      if (e instanceof RedirectConflictError) {
+        console.error(e.message)
+        process.exit(2)
+      }
+      throw e
+    }
     return
   }
 

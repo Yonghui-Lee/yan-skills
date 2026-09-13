@@ -34,10 +34,11 @@
  * 挂上监听，错过了脚本标签注入触发的请求（无论 `--all` 还是默认过滤）。
  * 同一个会话改用 `eval` 读 `performance.getEntriesByType('resource')` 与
  * `document.querySelectorAll('script[src]')`，同一批请求（GA4/Clarity/Ahrefs/
- * CF beacon 全部在内）立刻就能看到。这与本 Skill 另一份证据文件的结论一致
- * （`crossword-analytics-evidence.md`：`read_network_requests` 对这类脚本
+ * CF beacon 全部在内）立刻就能看到。这与某个项目侧沉淀的证据结论一致
+ * （某项目 `.rankup/` 下的分析脚本核验记录：`read_network_requests` 对这类脚本
  * 标签注入的跨域请求同样"看不见"，判据落在 `performance` 条目与 `script[src]`
- * 上才可靠）。因此本脚本判定第三方脚本"有没有加载"一律走这条路径，不用
+ * 上才可靠——项目专属的记录文件不属于本 Skill，具体出处见各项目自己的
+ * `.rankup/`）。因此本脚本判定第三方脚本"有没有加载"一律走这条路径，不用
  * opencli 的 `network` 命令。
  *
  * ── 两种场景 ─────────────────────────────────────────────────

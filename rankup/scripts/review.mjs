@@ -5,6 +5,15 @@
 //
 // 只读,不修改任何文件。输出缺口清单交给 review 流程去补。
 // 报告分五块:缺失文件、陈旧记录、脚本体检、生命周期检查点、经验库信号。
+//
+// ── 覆盖范围边界（2026-09-13 独立验收澄清）──────────────────────────
+// 本文件 checkIntegrationRows() 逐行核对的只是 discipline.md 十「接入看板」
+// 表格里的账号/平台接入行(Cloudflare Web Analytics、GA4、GSC、Yandex 这类需要
+// 在第三方后台开账号/拿到验证凭据的平台)。同一张表里 favicon/manifest、
+// SEO 元素(title/description/OG)、JSON-LD、is-agentic、hreflang 这些代码级
+// 行,不需要账号、靠代码/页面本身满足,不在 REQUIRED_INTEGRATION_PLATFORMS
+// 之列——它们由段 4 上线前闸门(lifecycle.md 段 4 C 节「上线前闸门」0–6 + 4b)
+// 覆盖检查,不是本脚本的漏检,是职责分工。
 
 import { readdir, readFile, stat } from "node:fs/promises";
 import { execFile } from "node:child_process";
@@ -193,9 +202,10 @@ function findColumnIndex(headerCells, keyword) {
   return headerCells.findIndex((cell) => cell.includes(keyword));
 }
 
-// 单个平台在弱证据判定里,"-"/"—"/"无"/"n/a" 这类占位符视同空,不算真的留了证据。
+// 单个平台在弱证据判定里,"-"/"—"/"无"/"n/a"/"待定"/"TBD" 这类占位符视同空,
+// 不算真的留了证据或写清楚了裁决依据/卡点。
 function looksLikeEmptyEvidence(text) {
-  return !text || /^[\s\-—–无]*$|^n\/?a$/i.test(text.trim());
+  return !text || /^[\s\-—–无]*$|^n\/?a$|^tbd$|^待定$/i.test(text.trim());
 }
 
 function checkIntegrationRows(text) {
@@ -251,6 +261,24 @@ function checkIntegrationRows(text) {
           name: platform.name,
           issue: "weak-evidence",
           detail: "标了 ✅ 但证据列是空的，不采信勾",
+        });
+      }
+    }
+
+    // ⏸(卡点)/❌(裁决不接入)同样必须写清楚原因——discipline.md 十要求「❌ 并写
+    // 裁决依据」「⏸ 写卡点」，只打个占位符（"-"/"待定"/"TBD"）等于没写,
+    // 跟完全空着一样查不出下一步该做什么，也无法区分"暂时卡住"和"想不起来了"。
+    if (glyph === "⏸" || glyph === "❌") {
+      const evidenceCell = evidenceIdx >= 0 ? (matchRow[evidenceIdx] ?? "") : "";
+      const inlineReason = statusCell.replace(glyph, "").trim();
+      const reason = evidenceCell || inlineReason;
+      if (looksLikeEmptyEvidence(reason)) {
+        gaps.push({
+          id: platform.id,
+          batch: platform.batch,
+          name: platform.name,
+          issue: "missing-reason",
+          detail: `标了 ${glyph} 但说明/证据列是空的或只有占位符（如"-"/"待定"/"TBD"），未写清楚${glyph === "❌" ? "裁决依据" : "卡点"}`,
         });
       }
     }
