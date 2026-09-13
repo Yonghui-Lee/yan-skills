@@ -30,14 +30,37 @@
  *      或 6s 兜底」的延迟加载设计。
  * `verify` 三件事都做：(a) 从 CF API 取 `site_tag`/`site_token`/`auto_install`；
  * (b) `fetch` 线上 HTML，用 `extractCfBeaconTokens` 抠出所有 `data-cf-beacon`
- * 里的 token；(c) 查 GraphQL `rumPageloadEventsAdaptiveGroups` 近 7 天 count。
+ * 附近的 token；(c) 查 GraphQL `rumPageloadEventsAdaptiveGroups` 近 7 天 count。
  * 三者交叉出「token 一致吗」「是不是重复注入」「beacon 是不是干脆缺失」三条
  * 判定，count 只作参考，**不能单独当接通的证据**（两份 beacon 同时打点时
  * count 一样 > 0）。全程只读，不改任何 CF 配置。
  *
+ * 【实测，2026-09-13，真实项目复盘】`extractCfBeaconTokens` 最初只认标准 CF
+ * 静态 snippet 形态 `data-cf-beacon="..."`，认不出「统一延迟加载器里用 JS
+ * `setAttribute('data-cf-beacon', ...)` 动态注入」这种同样常见的写法，会对
+ * 这类项目误判「线上找不到任何手嵌 beacon」——**已修**：判据改成「`data-cf-beacon`
+ * 出现之后、下一个语法收尾符号之前的窗口里找 32 位十六进制 token」，不再
+ * 关心具体是哪种 JS/HTML 语法把它写出来的（函数细节见该函数自己的注释）。
+ *
  * 规范（同步进 references/analytics-platforms.md「CF WA」节，两处不得各存一份）：
  * **`auto_install=false` + 手嵌 beacon 放进站点统一的延迟加载器 + token 只从
  * API 或页面 DOM 取，不手抄，不并存两条注入路径。**
+ *
+ * 【已知现象，非配置错误，2026-09-13 两个真实站点复现】同一个自动化环境
+ * （本机 opencli/Chrome 或 Google 自己的 PageSpeed 服务端）短时间内对同一 URL
+ * 重复访问几次之后，`/cdn-cgi/rum` 上报请求会从 `204` 转 `404`，导致 Lighthouse
+ * best-practices 审计偶尔从 100 掉到 96（拍到一条同源 404）。怀疑是 Cloudflare
+ * 对自动化/机器人特征流量的限流或反刷量机制——真实用户一次会话通常只加载一次，
+ * 不会触发这个模式。验收时看**第一次**干净加载是不是 204，别被这类偶发 404
+ * 带偏去重查 token/auto_install 配置本身。
+ *
+ * 【留给未来：给已存在的 site_info 记录改 auto_install】本脚本目前只有创建
+ * （`enable`，新建时就是 `auto_install:false`），没有针对已存在记录去改
+ * `auto_install` 的写路径；真要加，PUT 到 `/rum/site_info/<site_tag>`，
+ * **body 只需要 `{"auto_install": false}`**——site_tag 已经在 URL 路径里了，
+ * 模仿 `enable` 那个 POST 端点的 body 形态多带一个 `zone_tag` 会被 CF 拒绝，
+ * 报 `HTTP 400: 10004 web_analytics.configuration.api.malformedParams`
+ * （2026-09-13 真实项目踩过一次）。
  *
  * 凭据：只从环境变量 CLOUDFLARE_API_TOKEN 读，读不到就退到 <repo>/.cf-token
  * （该文件已被 .gitignore 排除）。真实值不打印、不落盘、不进日志。
@@ -188,27 +211,38 @@ function reportSite(s) {
 /* ── 纯函数：token 抠取与三件套判定（可脱离网络单测） ──────────── */
 
 /**
- * 从线上 HTML 里抠出所有 `data-cf-beacon` 属性里声明的 token。
- * 属性值是一段 JSON（`{"token":"..."}`），引号可能是单引号也可能是双引号。
- * 解析失败的片段不丢弃——记一条 `UNPARSED:` 前缀的原始片段，让「抓到了但读不出 token」
- * 和「压根没有这个属性」在返回值里可分辨，不静默合并成同一个「没有」。
+ * 从线上 HTML 里抠出所有 `data-cf-beacon` 出现处附带的 token。
+ *
+ * 【实测，2026-09-13，真实项目复盘】早期版本只认标准 CF 静态 snippet 形态
+ * `data-cf-beacon="..."`（HTML 属性赋值），认不出「统一延迟加载器里用 JS
+ * `setAttribute('data-cf-beacon', '{"token":...}')` 动态注入」这种同样常见的写法——
+ * 两者字符串里都有 `data-cf-beacon`，但一个后面跟 `=`，一个后面跟函数调用的逗号，
+ * 正则字面量匹配不上。对这类项目跑旧版会得到假阴性「线上找不到任何手嵌 beacon」，
+ * 即使 beacon 其实工作正常（`/cdn-cgi/rum` 也真的发出去了）。
+ *
+ * 现在的判据不再纠结「这段代码长什么语法形状」，只认**事实**：不管是静态属性、
+ * `setAttribute()` 调用参数、还是字符串拼接拼出来的 JSON，CF 的 token 本身
+ * 固定是 32 位十六进制——`data-cf-beacon` 出现之后，到下一个语法收尾符号
+ * （`>` 收静态属性、`)` 收函数调用，取先出现的那个）之间的窗口里找这个形状，
+ * 三种写法通吃。解析不出十六进制 token 的片段不丢弃——记一条 `UNPARSED:`
+ * 前缀的原始片段，让「抓到了但读不出 token」和「压根没有这个属性」在返回值里
+ * 可分辨，不静默合并成同一个「没有」。
  */
 export function extractCfBeaconTokens(html) {
+  const text = String(html || "")
   const tokens = []
-  const re = /data-cf-beacon\s*=\s*(['"])([\s\S]*?)\1/gi
+  const anchorRe = /data-cf-beacon/gi
   let m
-  while ((m = re.exec(String(html || "")))) {
-    const raw = m[2].replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, "&")
-    try {
-      const obj = JSON.parse(raw)
-      if (obj && typeof obj.token === "string" && obj.token) {
-        tokens.push(obj.token)
-        continue
-      }
-    } catch {
-      /* 落到下面记原始片段 */
-    }
-    tokens.push(`UNPARSED:${raw.slice(0, 80)}`)
+  while ((m = anchorRe.exec(text))) {
+    const rest = text.slice(m.index, m.index + 500)
+    const gt = rest.indexOf(">")
+    const paren = rest.indexOf(")")
+    const closers = [gt, paren].filter((i) => i >= 0)
+    const closeIdx = closers.length ? Math.min(...closers) : rest.length - 1
+    const windowText = rest.slice(0, closeIdx + 1)
+    const hex = windowText.match(/\b[a-f0-9]{32}\b/i)
+    if (hex) tokens.push(hex[0].toLowerCase())
+    else tokens.push(`UNPARSED:${windowText.slice(0, 80)}`)
   }
   return tokens
 }
@@ -220,7 +254,10 @@ export function extractCfBeaconTokens(html) {
 export function diagnoseCfWebAnalytics({ siteToken, autoInstall, tokensInHtml }) {
   const validTokens = (tokensInHtml || []).filter((t) => !t.startsWith("UNPARSED:"))
   const tokenKnown = Boolean(siteToken)
-  const tokenMismatch = tokenKnown && validTokens.length > 0 && !validTokens.includes(siteToken)
+  // 大小写不敏感比较：token 本身是十六进制,写法上大小写不该影响"是不是同一个值"的判断。
+  const normalized = (s) => String(s || "").toLowerCase()
+  const tokenMismatch =
+    tokenKnown && validTokens.length > 0 && !validTokens.map(normalized).includes(normalized(siteToken))
   const duplicateInjection = Boolean(autoInstall) && (tokensInHtml || []).length > 0
   const noBeaconFound = (tokensInHtml || []).length === 0 && !autoInstall
   const ok = !tokenMismatch && !duplicateInjection && !noBeaconFound

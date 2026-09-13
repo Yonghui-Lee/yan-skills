@@ -119,9 +119,34 @@ node <rankup-skill-dir>/scripts/cf-analytics-setup.mjs verify <domain>
 ```
 
 只读，不改任何 CF 配置：从 API 取 `site_tag`/`site_token`/`auto_install`，
-`fetch` 线上 HTML 抠出所有 `data-cf-beacon` 里的 token 逐个比对，判 token 是否
+`fetch` 线上 HTML 抠出所有 `data-cf-beacon` 附近的 token 逐个比对，判 token 是否
 一致、是否重复注入、beacon 是否干脆缺失，GraphQL count 只作参考（已验证
 2026-09-13，在一个真实启用了 CF WA 的域名上跑通三件套核验）。
+
+**token 抠取兼容静态属性与动态注入两种写法**（2026-09-13 真实项目复盘修）：
+标准 CF snippet 是 `data-cf-beacon="..."` 的 HTML 静态属性；本 Skill 推荐的
+「统一延迟加载器」常见写法是 JS 运行时 `setAttribute('data-cf-beacon', ...)`
+动态插入 `<script>`——两者字符串形状不同，早期版本的判据只认前者，会对用了
+延迟加载器的项目误判「线上找不到任何手嵌 beacon」。现在的判据不关心具体
+语法，只看「`data-cf-beacon` 出现之后到下一个语法收尾符号之间有没有一个
+32 位十六进制串」，静态属性、`setAttribute()` 调用、字符串拼接三种写法通吃。
+
+**已知现象，不是配置错误**：同一个自动化环境（本机 opencli/Chrome，或 Google
+自己的 PageSpeed 服务端）短时间内对同一 URL 重复访问几次之后，`/cdn-cgi/rum`
+上报请求会从 `204` 转 `404`，导致 Lighthouse best-practices 审计偶尔从 100 掉到
+96（`errors-in-console` 拍到一条同源 404）。【实测，2026-09-13，两个真实站点
+复现，其中一个是已知配置正确的站】怀疑是 Cloudflare 对自动化/机器人特征流量
+的限流或反刷量机制——真实用户一次会话通常只加载一次，不会触发这个模式。
+验收时看**第一次**干净加载是不是 204；看到偶发 404 先怀疑是不是短时间内被
+自动化工具重复请求过，不要直接去重查 token/auto_install 配置本身。
+
+**给已存在站点改 auto_install 的 PUT 坑**：本脚本目前只有 `enable`（新建时就是
+`auto_install:false`），没有针对已存在 `site_info` 记录去改 `auto_install` 的
+写路径。真要手动 `curl` 改，PUT 到 `/rum/site_info/<site_tag>`，**body 只需要
+`{"auto_install": false}`**——site_tag 已经在 URL 路径里了，模仿 `enable`
+那个 POST 端点的 body 形态多带一个 `zone_tag` 会被拒绝，报
+`HTTP 400: 10004 web_analytics.configuration.api.malformedParams`
+（2026-09-13 真实项目踩过一次）。
 
 ## 1. Microsoft Clarity
 
