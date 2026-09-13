@@ -150,7 +150,7 @@ Day-1 清单里最容易漏、也最贵的三条单列在这里，其余见 `lif
 ### 5 上线与接入
 
 - **触发**：「数据检测平台都接入了吗」「这个域名能不能用」「提交 sitemap」「把 Ahrefs 的检验结果都修了」。
-- **入口**：[`lifecycle.md`](references/lifecycle.md) 段 5；[`search-platforms.md`](references/search-platforms.md)、[`analytics-platforms.md`](references/analytics-platforms.md)；域名接入 [`cloudflare-stack.md`](references/cloudflare-stack.md) 8.5。常用：`scripts/cf-analytics-setup.mjs`、`scripts/indexnow-submit.mjs`、`scripts/webmaster-sitemap.mjs`、`scripts/ahrefs-site-audit.mjs`。
+- **入口**：[`lifecycle.md`](references/lifecycle.md) 段 5；[`search-platforms.md`](references/search-platforms.md)、[`analytics-platforms.md`](references/analytics-platforms.md)；域名接入 [`cloudflare-stack.md`](references/cloudflare-stack.md) 8.5。常用：`scripts/cf-analytics-setup.mjs`、`scripts/indexnow-submit.mjs`、`scripts/webmaster-sitemap.mjs`、`scripts/yandex-setup.mjs`、`scripts/ahrefs-site-audit.mjs`、`scripts/analytics-beacon-check.mjs`。
 
 | 硬规则 | 为什么 |
 |---|---|

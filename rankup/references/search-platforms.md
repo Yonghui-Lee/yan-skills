@@ -224,6 +224,42 @@ Naver 也支持 HTML 文件上传和 DNS TXT，选择逻辑与上面 GSC/Bing �
 
 入口：`https://webmaster.yandex.com/`
 
+自动化脚本：`scripts/yandex-setup.mjs`（`status` / `add-site` / `verify`），这是默认路径，
+不要手工点后台——添加站点、选 DNS record 验证方式、把 TXT 记录写进 Cloudflare、点
+Verify 全部由脚本完成，只有 DNS 传播这段等待需要人耐心：
+
+```bash
+# 查验证状态（只读）
+node <rankup-skill-dir>/scripts/yandex-setup.mjs status --site https://example.com
+
+# 添加站点 + 从页面 DOM 取 DNS TXT 验证值 + 自动写进 Cloudflare DNS
+# （站点已存在、TXT 已存在都会被识别并跳过，不重复加）
+node <rankup-skill-dir>/scripts/yandex-setup.mjs add-site --site https://example.com
+
+# 可选：验证 pending 也能提交 sitemap，不用等两天，串起来一次做完
+node <rankup-skill-dir>/scripts/yandex-setup.mjs add-site --site https://example.com --submit-sitemap
+
+# DNS 传播到权威 NS 之后点 Verify
+node <rankup-skill-dir>/scripts/yandex-setup.mjs verify --site https://example.com
+```
+
+**两个已实测的 UI 竞态坑（2026-09-13，两个真实站点上复现），脚本已经内置对策，
+不需要人工干预**：
+
+1. **Add 按钮首次点击常常不生效**——`fill` 已经把值写进了输入框，但第一次点击后
+   页面停在原地。判据是点击后 URL 有没有变成该站点的 access 设置页，没变就对同一个
+   目标重试，`--max-retries` 控制上限（默认 3）。
+2. **Verify 按钮同理，但更隐蔽**：点击后**页面文案完全不变**，opencli 的 `click`
+   本身永远返回成功——**唯一可靠判据是网络请求**：点击生效的那次会打一个
+   `POST .../gate/verification/verify/` 并返回 2xx，不生效的那几次这个请求压根
+   没发出去。脚本用 `opencli browser <s> network --since Ns` 判定，没命中就重试。
+
+**边界事实：验证 pending 也能提交 sitemap。** 两个站点在 DNS 验证仍处于
+「Check is in progress, it can take up to two days」的待定状态时，
+`webmaster-sitemap.mjs yandex status/submit` 依然能正常访问 Indexing/Sitemap
+页面并成功提交——**站点加入账号（哪怕验证 pending）就已经解锁这个功能，
+不需要先等验证通过**，别被这条直觉带偏而白白拖慢流程。
+
 #### 验证方式
 
 与 Bing/GSC/Naver 同理，优先 HTML meta 标签：
