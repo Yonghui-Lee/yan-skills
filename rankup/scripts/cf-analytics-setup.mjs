@@ -62,8 +62,11 @@
  * 报 `HTTP 400: 10004 web_analytics.configuration.api.malformedParams`
  * （2026-09-13 真实项目踩过一次）。
  *
- * 凭据：只从环境变量 CLOUDFLARE_API_TOKEN 读，读不到就退到 <repo>/.cf-token
- * （该文件已被 .gitignore 排除）。真实值不打印、不落盘、不进日志。
+ * 凭据解析统一走 ./lib-cf-auth.mjs 的 resolveCfAuth（2026-09-13 收敛，历史原因见
+ * 该文件头注释）：API Token 认 CLOUDFLARE_API_TOKEN 或 CF_API_TOKEN，都没有则
+ * 退到 Global API Key（CF_EMAIL/CLOUDFLARE_EMAIL 配 CF_GLOBAL_KEY/CLOUDFLARE_API_KEY，
+ * 必须成对）。这些都没配时还会退到 <repo>/.cf-token（该文件已被 .gitignore 排除，
+ * 只当 API Token 用，不支持在这里塞 Global Key）。真实值不打印、不落盘、不进日志。
  *
  * 需要的权限：Account > Account Analytics > Edit（RUM）+ Zone > Zone > Read。
  * 不要用 Global API Key：它不能限定 scope，泄露即等于整个账号。
@@ -76,46 +79,35 @@ import { join } from "node:path"
 import { realpath } from "node:fs/promises"
 import path from "node:path"
 import { pathToFileURL } from "node:url"
+import { cfAuthHeaders, resolveCfAccountId } from "./lib-cf-auth.mjs"
 
 const API = "https://api.cloudflare.com/client/v4"
 
-function token() {
-  if (process.env.CLOUDFLARE_API_TOKEN) return process.env.CLOUDFLARE_API_TOKEN.trim()
+/** 项目根目录下的 .cf-token（已 gitignore）：环境变量都没设置时的最后兜底，
+ * 只当 API Token 用——想用 Global Key 请直接设 CF_EMAIL/CF_GLOBAL_KEY 这对环境变量。 */
+function fileToken() {
   const f = join(process.cwd(), ".cf-token")
-  if (existsSync(f)) return readFileSync(f, "utf8").trim()
-  console.error(`找不到 API token。二选一：
-  export CLOUDFLARE_API_TOKEN=...        （当前 shell 有效）
-  echo '...' > .cf-token                 （已 gitignore）
-
-token 在 dash.cloudflare.com → My Profile → API Tokens → Create Token → Custom：
-  权限  Zone > Zone > Edit
-  范围  Zone Resources = All zones      ← 必须 All zones，不能选具体某个 zone
-不要用 Global API Key。`)
-  process.exit(2)
+  return existsSync(f) ? readFileSync(f, "utf8").trim() : undefined
 }
 
 /**
  * 两种凭据的 header 完全不同，认错会得到一个极具误导性的
- * `6003 Invalid request headers`（看着像请求写错了，其实是凭据类型不匹配）：
- *   - API Token（40 字符）  → Authorization: Bearer <token>
- *   - Global API Key（37 字符）→ X-Auth-Email + X-Auth-Key，还必须带账号邮箱
- * 按长度判别，并允许 CLOUDFLARE_EMAIL 覆盖。
+ * `6003 Invalid request headers`（看着像请求写错了，其实是凭据类型不匹配）。
+ * 具体的环境变量名、优先级与两种 header 的拼法见 ./lib-cf-auth.mjs。
  */
 function authHeaders() {
-  const t = token()
-  if (t.length === 37 && /^[0-9a-f]+$/.test(t)) {
-    const email = process.env.CLOUDFLARE_EMAIL
-    if (!email) {
-      console.error(`检测到 Global API Key。它必须配合账号邮箱使用：
-  export CLOUDFLARE_EMAIL=你的Cloudflare账号邮箱
-
-强烈建议改用 scoped API Token（Zone>Zone>Edit，范围 All zones）：
-Global Key 不能限定范围，泄露即等于整个账号。`)
-      process.exit(2)
-    }
-    return { "X-Auth-Email": email, "X-Auth-Key": t }
+  try {
+    return cfAuthHeaders({ token: process.env.CLOUDFLARE_API_TOKEN || process.env.CF_API_TOKEN || fileToken() })
+  } catch (e) {
+    console.error(
+      `${e.message}\n\n` +
+        `也可以把 API Token 写进 <repo>/.cf-token（已 gitignore），环境变量都没设置时会读它。\n\n` +
+        `token 在 dash.cloudflare.com → My Profile → API Tokens → Create Token → Custom：\n` +
+        `  权限  Zone > Zone > Edit\n` +
+        `  范围  Zone Resources = All zones      ← 必须 All zones，不能选具体某个 zone`,
+    )
+    process.exit(2)
   }
-  return { Authorization: `Bearer ${t}` }
 }
 
 async function cf(path_, init = {}) {
@@ -271,8 +263,7 @@ async function findSite(domain) {
   if (!zones.length) throw new Error(`${domain} 不在这个账号里，先跑 cf-zone-setup.mjs create`)
   const zone = zones[0]
 
-  const accounts = await cf("/accounts")
-  const accountId = process.env.CF_ACCOUNT_ID || accounts[0].id
+  const accountId = await resolveCfAccountId({ headers: authHeaders() })
 
   // 必须分页：默认每页 10 条，账号站点一多就会把已存在的条目判成「不存在」而重复创建。
   const existing = await cf(`/accounts/${accountId}/rum/site_info/list?per_page=100`)

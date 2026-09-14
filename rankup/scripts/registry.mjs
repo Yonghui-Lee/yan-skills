@@ -13,22 +13,11 @@
 // 名单是扫描生成的,不靠手工维护——手写的索引一定会过期(这是本 Skill 经验库里
 // 反复验证过的结论),所以每次 scan 都整表重建,读到的永远是磁盘上的当前事实。
 
-import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { readFileSync } from 'node:fs';
-// `--help` 是成功，不是用法错误。放在最前面：本文件在任何参数解析之前
-// 就会开工（起服务 / 读文件 / 校验必填），走到那里再判就已经晚了。
-// 帮助文案直接取本文件头部注释，不另写一份——两份必然漂移。
-if (process.argv.slice(2).some((a) => a === '--help' || a === '-h')) {
-  const src = readFileSync(new URL(import.meta.url).pathname, 'utf8');
-  const block = src.match(/\/\*\*([\s\S]*?)\*\//)
-    ? src.match(/\/\*\*([\s\S]*?)\*\//)[1].split('\n').map((l) => l.replace(/^\s*\* ?/, ''))
-    : src.split('\n').slice(1).filter((l) => l.startsWith('//')).map((l) => l.replace(/^\/\/ ?/, ''));
-  console.log(block.join('\n').trim());
-  process.exit(0);
-}
 
 // 名单默认就放在 Skill 目录里,挨着 SKILL.md,用的时候一眼看得到。
 // 它含项目名与绝对路径,因此被 rankup/.gitignore 排除,并由 validate-rankup.mjs
@@ -51,7 +40,12 @@ async function exists(target) {
 
 // 扫描根目录从命令行、环境变量或本机配置读取,绝不写死在脚本里——
 // 写死就意味着把某台机器的目录结构带进要开源的 Skill。
-async function resolveRoots(args) {
+//
+// 导出给 validate-rankup.mjs 复用(2026-09-13):项目中立守卫要拦"项目代号
+// 泄漏进 Skill",与其手工维护一张会过期的项目名黑名单(黑名单只能拦住它
+// 认识的词,新开项目忘了加就等于没有这道防线),不如运行时读这里的扫描根,
+// 把根目录下的子目录名当额外泄露词——同一份"扫描根在哪"逻辑,不重复实现。
+export async function resolveRoots(args) {
   const flagIndex = args.indexOf("--roots");
   if (flagIndex !== -1) {
     const roots = args.slice(flagIndex + 1).filter((value) => !value.startsWith("--"));
@@ -214,29 +208,68 @@ function render(projects, roots, stamp) {
   return lines.join("\n");
 }
 
-const [command = "list", ...args] = process.argv.slice(2);
+// ── CLI 入口 ─────────────────────────────────────────────────────
+//
+// 2026-09-13 修复:这一段(连同下面的 --help 处理)曾经是模块顶层直接执行的
+// 代码——validate-rankup.mjs 为了复用 resolveRoots() 而 `import` 本文件时,
+// 这段代码会跟着 import 一起跑,把本机真实的 registry.md(含真实项目名和
+// 绝对路径)整份打印到 validate-rankup.mjs 的 stdout 上,而 validate-rankup.mjs
+// 恰恰是那道"不许项目信息泄漏"的守卫——等于守卫自己在犯它要拦的错。
+// 现在收进 invokedAsScript() 守卫:只有直接 `node scripts/registry.mjs ...`
+// 运行时才执行 CLI 逻辑,被其他文件 import 时只取纯函数(resolveRoots 等),
+// 不会有任何副作用。写法与 cf-zone-setup.mjs 的 invokedAsScript() 一致。
 
-if (command === "scan") {
-  const roots = await resolveRoots(args);
-  if (roots.length === 0) {
-    console.error(
-      "未指定扫描根目录。用 --roots <目录>，或设 RANKUP_PROJECT_ROOTS，" +
-        `或在 ${configPath} 写 {"projectRoots": ["..."]}`,
-    );
+async function invokedAsScript() {
+  if (process.argv[1] === undefined) return false;
+  try {
+    const resolved = await realpath(path.resolve(process.argv[1]));
+    return pathToFileURL(resolved).href === import.meta.url;
+  } catch {
+    return false;
+  }
+}
+
+async function runCli() {
+  // `--help` 是成功，不是用法错误。放在命令分发之前：本文件在任何参数解析之前
+  // 就会开工（起服务 / 读文件 / 校验必填），走到那里再判就已经晚了。
+  // 帮助文案直接取本文件头部注释，不另写一份——两份必然漂移。
+  if (process.argv.slice(2).some((a) => a === '--help' || a === '-h')) {
+    const src = readFileSync(new URL(import.meta.url).pathname, 'utf8');
+    const block = src.match(/\/\*\*([\s\S]*?)\*\//)
+      ? src.match(/\/\*\*([\s\S]*?)\*\//)[1].split('\n').map((l) => l.replace(/^\s*\* ?/, ''))
+      : src.split('\n').slice(1).filter((l) => l.startsWith('//')).map((l) => l.replace(/^\/\/ ?/, ''));
+    console.log(block.join('\n').trim());
+    process.exit(0);
+  }
+
+  const [command = "list", ...args] = process.argv.slice(2);
+
+  if (command === "scan") {
+    const roots = await resolveRoots(args);
+    if (roots.length === 0) {
+      console.error(
+        "未指定扫描根目录。用 --roots <目录>，或设 RANKUP_PROJECT_ROOTS，" +
+          `或在 ${configPath} 写 {"projectRoots": ["..."]}`,
+      );
+      process.exit(1);
+    }
+    const projects = await scanRoots(roots);
+    await mkdir(path.dirname(registryPath), { recursive: true });
+    await writeFile(registryPath, render(projects, roots, new Date().toISOString().slice(0, 10)), "utf8");
+    const scriptCount = projects.reduce((total, project) => total + project.scripts.length, 0);
+    console.log(`已登记 ${projects.length} 个项目、${scriptCount} 个可复用脚本 -> ${registryPath}`);
+  } else if (command === "list") {
+    if (!(await exists(registryPath))) {
+      console.error(`登记表尚不存在。先运行:\n  node scripts/registry.mjs scan --roots <存放项目的目录>`);
+      process.exit(1);
+    }
+    process.stdout.write(await readFile(registryPath, "utf8"));
+  } else {
+    console.error(`未知命令: ${command}（可用: scan、list）`);
     process.exit(1);
   }
-  const projects = await scanRoots(roots);
-  await mkdir(path.dirname(registryPath), { recursive: true });
-  await writeFile(registryPath, render(projects, roots, new Date().toISOString().slice(0, 10)), "utf8");
-  const scriptCount = projects.reduce((total, project) => total + project.scripts.length, 0);
-  console.log(`已登记 ${projects.length} 个项目、${scriptCount} 个可复用脚本 -> ${registryPath}`);
-} else if (command === "list") {
-  if (!(await exists(registryPath))) {
-    console.error(`登记表尚不存在。先运行:\n  node scripts/registry.mjs scan --roots <存放项目的目录>`);
-    process.exit(1);
-  }
-  process.stdout.write(await readFile(registryPath, "utf8"));
-} else {
-  console.error(`未知命令: ${command}（可用: scan、list）`);
-  process.exit(1);
+}
+
+if (await invokedAsScript()) {
+  await runCli();
 }

@@ -321,6 +321,30 @@ Cloudflare 后台点"用该身份登录"会失败，表现为**控制台整个�
    `"ALLOW_INDEX": "true"`，提交推送，走 Workers Builds 自动重新部署。
    同样不必走 Workers settings API——直接改配置文件更省事，理由同步骤 3。
 
+7. **协议/host 收敛到规范 URL**：zone 没开 Always Use HTTPS、`www` 子域也没收敛到
+   裸域（或反过来），会让 http / http-www / https-www 三种非规范协议+host 组合
+   都能直接 200 访问到内容——这是一批表面上互不相干的问题（Ahrefs 之类的第二双
+   眼睛报出的重复内容、多个 sitemap 出现同一批 URL、内链走了非规范 host）背后
+   共同的根因，属于建站接入环节本应一次做好的 Day-1 类项，晚做的返工成本明显
+   更高。用 `scripts/cf-zone-setup.mjs` 的 `check-redirects`/`apply-redirects`
+   子命令：
+
+   ```bash
+   node <rankup-skill-dir>/scripts/cf-zone-setup.mjs check-redirects <domain>
+   node <rankup-skill-dir>/scripts/cf-zone-setup.mjs apply-redirects <domain> --to apex
+   ```
+
+   `--to apex` 把 `www.<domain>` 收敛到裸域，`--to www` 收敛到 `www` 子域，二选一
+   必填、没有默认值——方向是意图声明，不能靠猜。两个已验证的坑（2026-09-13）：
+   - `target_url` 的 `expression` **不支持 `if()`**，wirefilter 表达式语法会报
+     `unknown identifier`——查询串保留与否交给同级的 `preserve_query_string`
+     参数处理，不要在 expression 里手写判空逻辑。
+   - **不要套用 Cloudflare 控制台自带的「从 WWW 重定向到根」模板规则**：它硬编码
+     匹配 `https://www.*`（要求协议已经是 https），来源若是 `http://www.*` 会先
+     被 Always Use HTTPS 接走升级协议、再撞上这条规则，变成两跳而不是一跳。手写
+     规则按 `http.host`（不含协议前缀）匹配，不管来源协议是 http 还是 https 都
+     一次性跳到位，这是刻意的设计，不是疏漏。
+
 **这一条经验补充的坑，前两段没写全的部分**：
 - Workers Custom Domains 的正确端点是账号级的 `/accounts/{account_id}/
   workers/domains`，裸域和 `www` 子域名各发一次请求，不是一次调用绑两个 host。
@@ -330,7 +354,9 @@ Cloudflare 后台点"用该身份登录"会失败，表现为**控制台整个�
 - 域名在哪个注册商买的不影响这条流程，只要用户能进去改 NS 就行。
 
 **实测验证**：2026-09-11，两个域名分别绑定到各自的 Workers 项目，从 zone
-创建到自定义域名生效、环境变量部署，全流程走 API 完成，全程零界面操作。
+创建到自定义域名生效、环境变量部署，全流程走 API 完成，全程零界面操作；
+协议/host 收敛（步骤 7，`check-redirects`/`apply-redirects`）：2026-09-13
+在真实账号上验证通过。
 
 ## 8.6 品牌邮箱：Cloudflare Email Routing
 

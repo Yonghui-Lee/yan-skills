@@ -236,6 +236,63 @@ test("没有 infrastructure.md 但 integrations.md 出现正式域名时，批 B
   });
 });
 
+// ⏸/❌ 行必须写清楚卡点/裁决依据——discipline.md 十明确要求，只打占位符
+// 等于没写，跟完全空着一样查不出下一步该做什么。
+test("❌ 行说明列是空的或只有占位符时报 missing-reason", async () => {
+  await withProject(async (root) => {
+    const rows = FULL_INTEGRATIONS_TABLE.split("\n").map((line) =>
+      line.includes("其他能带流量的平台")
+        ? "| 兜底 | 其他能带流量的平台 | ❌ | | |"
+        : line,
+    );
+    await seed(root, {
+      "infrastructure.md": "zone: example-reason.com 已定稿域名，Cloudflare 托管\n",
+      "integrations.md": rows.join("\n"),
+    });
+    const report = JSON.parse(runReview(root, ["--json"]).stdout);
+    const gap = report.lifecycle.integrationGaps.find((g) => g.id === "fallback-platform");
+    assert.ok(gap, "❌ 且说明为空应该被报出来");
+    assert.equal(gap.issue, "missing-reason");
+  });
+});
+
+test("⏸ 行说明列只有占位符（-/待定/TBD）时报 missing-reason，不是空字符串才算", async () => {
+  await withProject(async (root) => {
+    for (const placeholder of ["-", "待定", "TBD"]) {
+      const rows = FULL_INTEGRATIONS_TABLE.split("\n").map((line) =>
+        line.includes("Ahrefs Site Audit")
+          ? `| 站点体检 | Ahrefs Site Audit | ⏸ | ${placeholder} | |`
+          : line,
+      );
+      await seed(root, {
+        "infrastructure.md": "zone: example-pause.com 已定稿域名，Cloudflare 托管\n",
+        "integrations.md": rows.join("\n"),
+      });
+      const report = JSON.parse(runReview(root, ["--json"]).stdout);
+      const gap = report.lifecycle.integrationGaps.find((g) => g.id === "ahrefs-site-audit");
+      assert.ok(gap, `占位符 "${placeholder}" 应该被判定为没写清楚卡点`);
+      assert.equal(gap.issue, "missing-reason");
+    }
+  });
+});
+
+test("⏸/❌ 行写了真实的卡点/裁决依据时不报 missing-reason", async () => {
+  await withProject(async (root) => {
+    const rows = FULL_INTEGRATIONS_TABLE.split("\n").map((line) =>
+      line.includes("Ahrefs Site Audit")
+        ? "| 站点体检 | Ahrefs Site Audit | ⏸ | 抓取任务排队中，预计次日出结果 | 2026-09-12 |"
+        : line,
+    );
+    await seed(root, {
+      "infrastructure.md": "zone: example-real-reason.com 已定稿域名，Cloudflare 托管\n",
+      "integrations.md": rows.join("\n"),
+    });
+    const report = JSON.parse(runReview(root, ["--json"]).stdout);
+    const gap = report.lifecycle.integrationGaps.find((g) => g.id === "ahrefs-site-audit");
+    assert.equal(gap, undefined, "写了真实卡点说明不该被报缺口");
+  });
+});
+
 test("域名未定稿（没有 infrastructure.md）时批 B 不报错，只查批 A", async () => {
   await withProject(async (root) => {
     await seed(root, {

@@ -228,6 +228,7 @@ npx @yan-labs/rankup audit similarweb --manifest .rankup/provider-audit/similarw
 - 同一平台首页最多用于首次启动一次；进入工具域名后走内页，不要每项报告重新经过首页。
 - `audit` 的 manifest 既是页面目录也是续跑入口；每页证据固定八件（page.txt / page.html / DOM / AX / parsed / app JSON / network shape / 全页截图）外加带 SHA-256 的 `receipt.json`。截图不做遮罩；只有 Cookie、登录令牌这类可直接接管账号的凭据不落盘。
 - 国家数据库不能只看默认美国：先看 global/country distribution，主要需求在别国时切到该国家库复核；抓取失败或权限不足不能写成零需求。
+- 更通用的一条：**脚本的国家/地区/语言参数默认值不代表全球**。能选全球的平台（Google Trends 的 `geo` 留空、Similarweb 关键词生成器的 `country=999` Worldwide）默认就该给全球；不能选全球的平台（Google 网页搜索、App Store、Google Play、Chrome Web Store、广告透明度中心……）本来就要按国家/语言查，这层默认无法消除，但脚本的产出记录必须把这次用的国家/语言写清楚，不能只留在请求 URL 里，事后要能从产出文件本身查出当时的口径。文档示例命令里出现的 `us`/`en` 只是占位，不代表"默认就该这样"或"标准做法"——换目标市场前自己想清楚要传什么。
 
 ### 两家「流量」口径不同，对不上要查清原因
 
@@ -338,6 +339,8 @@ Skill 集合不一样，文档只保证「该用什么」；遇缺就跳过会�
 
 **批 A/批 B 每个平台一行独立勾选，抄录时不得合并或省略；状态只能是 ✅（附证据）/❌（写裁决依据）/⏸（写卡点）/⬜，表头不得用『⬜=未在本文件核实』这类弱化口径，看板必须与 `checks.md` 同步。**
 
+**`rankup review`/`scripts/review.mjs` 的逐行核对范围（2026-09-13 独立验收澄清）**：`review.mjs` 的 `checkIntegrationRows()` 只逐行核对上表里的**账号/平台接入行**（Cloudflare Web Analytics、GA4、Clarity、IndexNow、GSC、Bing、Yandex、Naver、Ahrefs WA、Ahrefs Site Audit、Email Routing、Preferred Sources、兜底这十三行）——这些都要在第三方后台开账号或拿验证凭据。同一张表里**品牌资产、SEO 元素、结构化数据、AI 就绪度、多语言**这五行是代码级行，靠代码/页面本身满足，不需要账号，`review.mjs` 不逐行核对它们；它们由段 4 上线前闸门（`lifecycle.md` 段 4 C 节「上线前闸门」0–6 + 4b）覆盖检查。看到 `review.mjs` 没报这五行的缺口，不代表它们免检，去段 4 闸门找判据。
+
 ---
 
 ## 十一、令牌统一放 Skill 根目录的 `.env`
@@ -356,6 +359,19 @@ Skill 集合不一样，文档只保证「该用什么」；遇缺就跳过会�
 3. **调用方脚本必须和驱动脚本用同一套解析。** 只看环境变量的调用方会在令牌配好的情况下判「没有令牌」，退回匿名档撞配额，而报错在教人去设一个已经设好的变量。
 4. **令牌失效时更新这一个文件**，不在项目里另建副本；某处读不到，修读取逻辑。
 5. **真实值不出现在任何回复、日志、提交或落盘数据里。** 需要说明时只说键名与所在文件。
+6. **Cloudflare 凭据额外认一套 `CF_` 简写别名**，统一解析走
+   [`../scripts/lib-cf-auth.mjs`](../scripts/lib-cf-auth.mjs) 的 `resolveCfAuth`（2026-09-13 收敛）：
+   API Token 方式认 `CLOUDFLARE_API_TOKEN` 或 `CF_API_TOKEN`（同时设置时 `CLOUDFLARE_API_TOKEN`
+   优先）；都没有则退到 Global API Key 方式，email 认 `CLOUDFLARE_EMAIL` 或 `CF_EMAIL`、
+   key 认 `CLOUDFLARE_API_KEY` 或 `CF_GLOBAL_KEY`（同样 `CLOUDFLARE_*` 优先），email 与 key
+   必须成对出现。`cf-zone-setup.mjs`、`cf-analytics-setup.mjs`、`cf-agent-baseline.mjs`、
+   `cf-builds-connect.mjs`、`yandex-setup.mjs` 统一改走这个函数，不再各自手搓判据——
+   曾经五份手搓实现各读不同的变量名，本机凭据明明配的是 `CF_EMAIL`+`CF_GLOBAL_KEY`，
+   却有脚本读不到，正是规则 3「调用方脚本必须和驱动脚本用同一套解析」要挡的那类问题。
+   account id 是同一类问题的另一处：认 `CLOUDFLARE_ACCOUNT_ID` 或 `CF_ACCOUNT_ID`
+   （同时设置时 `CLOUDFLARE_ACCOUNT_ID` 优先），统一解析走同一个文件的
+   `resolveCfAccountId`；两个都没配时它会调 `GET /accounts` 兜底，账号唯一直接用，
+   账号为空或有多个则报错列出这两个变量名（不打印任何凭据值）。
 
 安装后 `.env` 不存在是正常状态，首次需要令牌时创建即可。
 

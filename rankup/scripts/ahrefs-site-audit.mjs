@@ -11,13 +11,63 @@
  * 用法：
  *   node <rankup-skill-dir>/scripts/ahrefs-site-audit.mjs projects [--json]
  *   node <rankup-skill-dir>/scripts/ahrefs-site-audit.mjs report <项目|域名片段> <报告> [--json] [--out f]
+ *   node <rankup-skill-dir>/scripts/ahrefs-site-audit.mjs schedule <项目ID> [--json]
  *   node <rankup-skill-dir>/scripts/ahrefs-site-audit.mjs routes
  *
  * 标志：
  *   --session <名>   opencli 会话名。**默认固定 `ahrefs-nav`，不要传**——理由见下。
  *   --wait <毫秒>    报告渲染等待上限，默认 20000。不再硬睡这么久：页内轮询到
  *                    「正文长度 > 阈值且连续两拍不变」就提前返回，这个值只是封顶。
+ *   --retries <n>    `open` 步骤遇到瞬时性错误（见下「间歇性 Navigation rejected」）
+ *                     时的重试次数，默认 2（即最多尝试 3 次）。
+ *   --max-pages <n>  `report <id> data-explorer?...` 页大小固定 50 且无翻页/无限
+ *                     滚动时，换排序重新抓取合并去重的最多尝试次数，默认 5（见下）。
  *   --keep-session   完成后不关闭（失败时想留现场标签页也用它）
+ *
+ * ── 间歇性 "Navigation rejected"（2026-09-13 实测确认为瞬时性）─────
+ *
+ * `projects` 等导航偶发报 `Navigation rejected`，从现场日志看是浏览器扩展/CDP
+ * 层面的瞬时拒绝，不是页面真的打不开——原样重跑一次往往就好（分诊阶梯第 1 层）。
+ * 之前脚本对此直接 bail，把偶发问题升级成任务失败；现在 `open` 步骤命中
+ * `isTransientOpenError` 判定为瞬时错误时，内建自动重试（`--retries`，默认 2 次，
+ * 间隔 2 秒），仍然失败才 bail 并把最后一次的错误原样报出。
+ *
+ * ── data-explorer 页大小固定 50、无翻页（2026-09-13 实测确认）─────
+ *
+ * **穷举验证过三条路都不通**：(1) DOM 里没有任何"下一页"/页码控件（按钮、链接
+ * 逐个枚举过，wrapper 容器里零交互元素）；(2) 真实 CDP 滚轮事件 + 程序化设置
+ * `scrollTop` 都不会让虚拟化表格加载更多行（表格本身就只渲染了这一页，不是
+ * 虚拟滚动）；(3) 表格自带的"导出"按钮点击后既不弹对话框也不触发下载（`wait
+ * download` 4 秒超时），在免费/Basic 档位上似乎完全没有可观测效果。
+ *
+ * 因此 `report <id> data-explorer?...` 改成**换排序重新抓取、按 URL 去重合并**
+ * 的折中方案：首次抓取按路由自带的 `sorting` 参数（通常是某个数值列降序）；
+ * 若页面提供的总数（"N 个结果"）大于已捕获的唯一 URL 数，依次尝试路由
+ * `columns=` 参数里列出的其它列的升/降序，每次都是新的一次导航，合并去重直到
+ * 覆盖总数或达到 `--max-pages` 上限（默认 5）。**这是尽力而为，不是保证全量**：
+ * 输出里 `complete: true/false` 如实标注，`>50` 且排序尝试仍未覆盖全部的
+ * issue，`complete` 为 false 且列出已尝试过的排序变体，不假装拿到了全量。
+ * 行的抽取方式也从旧版的"整页拍平文本"改成**真实 DOM 表格逐行逐格读取**
+ * （`table tbody tr > td`），比文本形状正则更不容易受列结构变化影响。
+ *
+ * ── schedule：只读查看下次排程抓取时间（2026-09-13 新增）───────────
+ *
+ * **免费档（Basic）不支持手动立即抓取，「开始」按钮不要点。** 项目列表里那颗
+ * 看起来像"立即抓一次"的「开始」按钮，点击后并不会触发一次性抓取，而是导航到
+ * `project-settings/<id>/site-audit?isFromStartAoa=true&...`——这是「Always-On
+ * Audit」（持续审计，Pro 版付费功能）的开通向导，页面上有一个需要升级到 Pro
+ * 才能开的「始终在线的审计」开关。**已实测确认**：直接导航到
+ * `project-settings/<id>/site-audit`（不带 `isFromStartAoa` 参数）会看到完全
+ * 相同的内容——说明这个按钮本身只是普通页面跳转，不会自己触发任何抓取或计费
+ * 动作，真正需要避免的是页面上那个「升级」/「始终在线的审计」开关，那会走进
+ * 付费升级流程，不是本 Skill 该碰的动作。
+ *
+ * `schedule` 子命令**不导航到上面这个设置页**——项目列表（`projects` 命令）的
+ * 表格里本来就有一列"已排程"，直接给出下一次具体的日期与时间窗（形如
+ * "9月18日, 3—4 凌晨"），比设置页里的周期性规则（"每周五 03:00–03:59"，
+ * 不含具体下次日期）更直接。`schedule <项目ID>` 复用 `projects` 页面的同一次
+ * 抓取，改成真实 DOM 表格逐行读取（`table tbody tr`，不是拍平文本），定位到
+ * 目标项目所在行后取出"已排程"单元格，全程只读、零点击，不会碰到升级向导。
  *
  * ── 为什么是浏览器而不是 API（实测 2026-08-29）────────────────────
  *
@@ -52,8 +102,10 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { dirname } from "node:path";
-import { newEvidenceDir, captureScene, writeManifest } from "./lib-scene.mjs";
+import { dirname, resolve as resolvePath } from "node:path";
+import { realpath } from "node:fs/promises";
+import { pathToFileURL } from "node:url";
+import { newEvidenceDir, captureScene, writeManifest, msleep } from "./lib-scene.mjs";
 
 const BASE = "https://app.ahrefs.com/site-audit";
 const SCRIPT = "ahrefs-site-audit";
@@ -77,9 +129,17 @@ const ROUTES = {
   "project-history": "项目历史：健康评分随时间变化",
 };
 
-function parseArgs(argv) {
+export function parseArgs(argv) {
   const pos = [];
-  const o = { session: "ahrefs-nav", wait: 20000, json: false, out: null, keep: false };
+  const o = {
+    session: "ahrefs-nav",
+    wait: 20000,
+    json: false,
+    out: null,
+    keep: false,
+    retries: 2,
+    maxPages: 5,
+  };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--session") o.session = argv[++i];
@@ -87,6 +147,8 @@ function parseArgs(argv) {
     else if (a === "--out") o.out = argv[++i];
     else if (a === "--json") o.json = true;
     else if (a === "--keep-session") o.keep = true;
+    else if (a === "--retries") o.retries = Number(argv[++i]);
+    else if (a === "--max-pages") o.maxPages = Number(argv[++i]);
     else if (a === "-h" || a === "--help") o.help = true;
     else if (a.startsWith("--")) {
       console.error(`未知参数：${a}`);
@@ -94,6 +156,75 @@ function parseArgs(argv) {
     } else pos.push(a);
   }
   return { pos, o };
+}
+
+/* ── 纯函数：可脱离浏览器单测 ─────────────────────────────────── */
+
+/**
+ * `open` 步骤的错误信息是不是看着像瞬时性拒绝（浏览器扩展/CDP 层面），
+ * 而不是「这个站真的打不开」。命中就值得重试，不命中直接 bail——
+ * 不是所有 open 失败都该重试（比如登录态失效、目标本来就不存在）。
+ */
+export function isTransientOpenError(message) {
+  return /navigation rejected|net::err_aborted|econnreset|frame was detached|target closed|timed out/i.test(
+    String(message || ""),
+  );
+}
+
+/**
+ * 从 data-explorer 页面文本里抠总数（"189 个 结果" / "189 results"）。
+ * 找不到就是 null，不当 0——0 和"没解析到"是两件事。
+ */
+export function parseDataExplorerTotal(pageText) {
+  // 不能在末尾加 `\b`：CJK 字符不是正则的"单词字符"，"结果"后面紧跟空格时
+  // 两边都不是 word char，`\b` 反而匹配不上——之前踩过这个坑，2026-09-13 修。
+  const m = String(pageText || "").match(/(\d[\d,]*)\s*(?:个\s*结果|results?)/i);
+  return m ? Number(m[1].replace(/,/g, "")) : null;
+}
+
+/** 从一行的各格文本里找第一个看起来像 URL 的字段——data-explorer 每行都带受影响页面的地址。 */
+export function extractRowUrl(cells) {
+  for (const c of cells || []) {
+    const m = String(c || "").match(/https?:\/\/\S+/);
+    if (m) return m[0];
+  }
+  return null;
+}
+
+/**
+ * 合并多次换排序抓到的行，按抽取出的 URL 去重。抽不出 URL 的行不丢弃
+ * （不能因为解析不出关键字段就假装它不存在），但不参与去重计数。
+ */
+export function mergeDataExplorerRows(pages) {
+  const seen = new Map();
+  const noUrl = [];
+  for (const page of pages || []) {
+    for (const cells of page || []) {
+      const url = extractRowUrl(cells);
+      if (url) {
+        if (!seen.has(url)) seen.set(url, cells);
+      } else {
+        noUrl.push(cells);
+      }
+    }
+  }
+  return { rows: [...seen.values(), ...noUrl], uniqueUrlCount: seen.size, noUrlCount: noUrl.length };
+}
+
+/**
+ * 给定路由自带的列清单，按顺序尝试每列的降序、升序，跳过已经用过的变体。
+ * 没有更多可试的变体就返回 null（调用方据此停止翻页尝试）。
+ * 通用化的理由：不同 issue 类型的 `columns=` 参数不同，硬编码一个列名
+ * 只对某一类问题有效，换一类问题就要重写；按路由自己声明的列走，
+ * 同一份逻辑对所有 data-explorer 路由都成立。
+ */
+export function nextSortingVariant(columns, usedVariants) {
+  for (const col of columns || []) {
+    for (const variant of [`-${col}`, col]) {
+      if (!usedVariants.has(variant)) return variant;
+    }
+  }
+  return null;
 }
 
 function browser(session, args, timeoutMs = 200_000) {
@@ -158,24 +289,42 @@ function bail(o, stopReason, msg, extra) {
 
 // 一次访问打包成一个 batch：含写操作的 batch 整体按写处理，别人插不进来。
 function openAndEval(o, url, js) {
-  let raw;
-  try {
-    raw = browser(o.session, [
-      "batch",
-      "--commands",
-      JSON.stringify([{ cmd: "open", args: { url } }, { cmd: "eval", args: { js } }]),
-    ]);
-  } catch (e) {
-    // batch 本身没跑起来（daemon 掉线 / 超时），此时可能连会话都没有，
-    // 截图多半也采不到——captureScene 会把这一点如实记进 manifest。
-    bail(o, "opencli-failed", `opencli batch 失败：${String(e?.stderr || e?.message || e).slice(0, 400)}`, { url });
+  const maxAttempts = Math.max(1, (Number(o.retries) || 0) + 1);
+  let lastOpenError = null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    let raw;
+    try {
+      raw = browser(o.session, [
+        "batch",
+        "--commands",
+        JSON.stringify([{ cmd: "open", args: { url } }, { cmd: "eval", args: { js } }]),
+      ]);
+    } catch (e) {
+      // batch 本身没跑起来（daemon 掉线 / 超时），此时可能连会话都没有，
+      // 截图多半也采不到——captureScene 会把这一点如实记进 manifest。
+      bail(o, "opencli-failed", `opencli batch 失败：${String(e?.stderr || e?.message || e).slice(0, 400)}`, { url });
+    }
+    const arr = JSON.parse(raw.slice(raw.indexOf("[")));
+    const open = arr.find((x) => x.cmd === "open");
+    if (!open?.ok) {
+      const errText = JSON.stringify(open?.error);
+      // 间歇性 "Navigation rejected" 一类瞬时拒绝（浏览器扩展/CDP 层面，不是站点真的
+      // 打不开）：实测原样重跑一次往往就好（分诊阶梯第 1 层）。命中就重试，不命中
+      // （比如登录态失效、目标本来就不存在）直接 bail，不浪费时间重试注定失败的事。
+      if (attempt < maxAttempts && isTransientOpenError(errText)) {
+        lastOpenError = errText;
+        console.error(`打开 ${url} 遇到疑似瞬时错误（第 ${attempt}/${maxAttempts} 次）：${errText}，2 秒后重试。`);
+        msleep(2000);
+        continue;
+      }
+      bail(o, "open-failed", `打开失败（已尝试 ${attempt} 次）：${errText}`, { url, steps: arr, lastOpenError });
+    }
+    const ev = arr.find((x) => x.cmd === "eval");
+    if (!ev?.ok) bail(o, "eval-failed", `读取失败：${JSON.stringify(ev?.error)}`, { url, steps: arr });
+    return JSON.parse(ev.result);
   }
-  const arr = JSON.parse(raw.slice(raw.indexOf("[")));
-  const open = arr.find((x) => x.cmd === "open");
-  if (!open?.ok) bail(o, "open-failed", `打开失败：${JSON.stringify(open?.error)}`, { url, steps: arr });
-  const ev = arr.find((x) => x.cmd === "eval");
-  if (!ev?.ok) bail(o, "eval-failed", `读取失败：${JSON.stringify(ev?.error)}`, { url, steps: arr });
-  return JSON.parse(ev.result);
+  // 理论上到不了这里（循环内要么 return 要么 bail/continue），留一个防御性出口。
+  bail(o, "open-retries-exhausted", `打开 ${url} 重试 ${maxAttempts} 次仍失败：${lastOpenError}`, { url });
 }
 
 // eval 体一律包 IIFE：本环境 eval 上下文跨调用持续，重复声明会抛错且那次调用不执行。
@@ -198,6 +347,59 @@ const readPage = (waitMs) => `(async()=>{
     .map(a=>a.getAttribute('href')||'').filter(h=>/^\\/site-audit\\/\\d+\\//.test(h)))];
   return JSON.stringify({url: location.href, text: t, textLen: t.length, settled: stable >= 2, links});
 })()`;
+
+// data-explorer 是真实 DOM 表格（`table tbody tr > td`），不是拍平文本能可靠解析的
+// 形状——2026-09-13 实测确认没有翻页/无限滚动控件，页大小固定 50；轮询判据改成
+// 「行数稳定」而不是「文本长度稳定」，因为表格首屏渲染完之后文本长度本来就不再变。
+const readDataExplorerPage = (waitMs) => `(async()=>{
+  const deadline = Date.now() + ${Math.max(1000, Number(waitMs) || 20000)};
+  let prevRowCount = -1, stable = 0;
+  while (Date.now() < deadline) {
+    const rc = document.querySelectorAll('table tbody tr').length;
+    if (rc > 0 && rc === prevRowCount) { stable++; if (stable >= 2) break; }
+    else stable = 0;
+    prevRowCount = rc;
+    await new Promise(r=>setTimeout(r,1000));
+  }
+  const rows = [...document.querySelectorAll('table tbody tr')]
+    .map(tr => [...tr.querySelectorAll('td')].map(td => td.textContent.trim()))
+    .filter(cells => cells.some(c => c.length > 3));
+  const t = document.body ? document.body.innerText.replace(/\\s+/g,' ') : '';
+  return JSON.stringify({url: location.href, text: t, textLen: t.length, settled: stable >= 2, rows});
+})()`;
+
+// 项目列表同样是真实表格；用于 `schedule` 子命令定位单个项目那一行，
+// 不复用 cmdProjects 已经在用、且已实盘验证过的 readPage/links 逻辑，
+// 避免为了新增一个只读命令去改一个已经在用的路径。
+const readProjectsTable = (waitMs) => `(async()=>{
+  const deadline = Date.now() + ${Math.max(1000, Number(waitMs) || 20000)};
+  let prevRowCount = -1, stable = 0;
+  while (Date.now() < deadline) {
+    const rc = document.querySelectorAll('table tbody tr').length;
+    if (rc > 0 && rc === prevRowCount) { stable++; if (stable >= 2) break; }
+    else stable = 0;
+    prevRowCount = rc;
+    await new Promise(r=>setTimeout(r,1000));
+  }
+  const rows = [...document.querySelectorAll('table tbody tr')].map(tr => {
+    const link = tr.querySelector('a[href^="/site-audit/"]');
+    const idMatch = link ? (link.getAttribute('href')||'').match(/^\\/site-audit\\/(\\d+)\\//) : null;
+    const cells = [...tr.querySelectorAll('td')].map(td => td.textContent.trim()).filter(Boolean);
+    return { id: idMatch ? idMatch[1] : null, cells };
+  }).filter(r => r.id);
+  const t = document.body ? document.body.innerText.replace(/\\s+/g,' ') : '';
+  return JSON.stringify({url: location.href, text: t, textLen: t.length, settled: stable >= 2, rows});
+})()`;
+
+/**
+ * 从项目列表某一行的原始格文本里找"已排程"那一格——判据是形状（日期 + 时间段
+ * 破折号 + 可选的时段词），不是列下标（表格里有多个装饰性空 `<td>`，下标不稳定）。
+ * "最后一次抓取" 格是单个具体时间（没有时间段破折号），靠这条差异区分两者。
+ */
+export function parseScheduledCell(cells) {
+  const re = /^(?:\d{1,2}月\d{1,2}日|[A-Za-z]{3}\s\d{1,2}),?\s*\d{1,2}\s*[—-]\s*\d{1,2}\s*(?:凌晨|上午|中午|下午|晚上|AM|PM)?$/i;
+  return (cells || []).find((c) => re.test(String(c || "").trim())) || null;
+}
 
 // 登录判据**只看 URL**，绝不看正文。
 // 实测 2026-08-29：早先按正文子串判，被审计站点自己的报告数据触发了误报——
@@ -266,6 +468,8 @@ async function cmdReport(pos, o) {
     process.exit(1);
   }
 
+  if (isRawPath) return cmdReportDataExplorer(o, id, route);
+
   const page = openAndEval(o, `${BASE}/${id}/${route}`, readPage(o.wait));
   requireLogin(o, page);
   if (/Page not found|找不到|couldn.t find that page/i.test(page.text)) {
@@ -283,47 +487,176 @@ async function cmdReport(pos, o) {
   return o.json ? JSON.stringify({ projectId: id, route, ...page }, null, 2) : page.text;
 }
 
-const { pos, o } = parseArgs(process.argv.slice(2));
-const cmd = pos[0];
+/**
+ * data-explorer 的翻页折中方案（2026-09-13，见文件头「data-explorer 页大小固定
+ * 50、无翻页」）：真实 DOM 表格逐行读取，首次抓取按路由自带的排序；总数大于已
+ * 捕获的唯一 URL 数时，依次换路由 `columns=` 里列出的其它列的降/升序重新抓取，
+ * 按抽取出的 URL 去重合并，直到覆盖总数或达到 `--max-pages` 上限。**尽力而为，
+ * 不保证全量**——`complete` 如实标注，覆盖不到时列出已尝试的排序变体。
+ */
+async function cmdReportDataExplorer(o, id, route) {
+  const initialUrl = `${BASE}/${id}/${route}`;
+  const usedVariants = new Set();
+  const initialSortMatch = route.match(/[?&]sorting=([^&]+)/);
+  if (initialSortMatch) usedVariants.add(decodeURIComponent(initialSortMatch[1]));
+  const columnsMatch = route.match(/[?&]columns=([^&]+)/);
+  const columns = columnsMatch ? decodeURIComponent(columnsMatch[1]).split(",").filter(Boolean) : [];
 
-if (o.help || !cmd) {
-  console.log(
-    "用法：\n" +
-      "  ahrefs-site-audit.mjs projects [--json]\n" +
-      "  ahrefs-site-audit.mjs report <项目ID> <报告> [--json] [--out f] [--wait ms]\n" +
-      "  ahrefs-site-audit.mjs routes\n\n" +
-      "会话名固定 ahrefs-nav（并发度 1），不要传 --session。\n" +
-      "失败时现场（截图+文本+manifest）落 .rankup/evidence/ahrefs-site-audit-<ts>/。",
-  );
-  process.exit(0);
+  const firstPage = openAndEval(o, initialUrl, readDataExplorerPage(o.wait));
+  requireLogin(o, firstPage);
+  if (/Page not found|找不到|couldn.t find that page/i.test(firstPage.text)) {
+    bail(
+      o,
+      "page-text-matched-404",
+      `路由 ${route} 在项目 ${id} 上的页面文本命中了「Page not found」类字样，看截图。`,
+      { finalUrl: firstPage.url, route, id },
+    );
+  }
+
+  const total = parseDataExplorerTotal(firstPage.text);
+  const pagesRows = [firstPage.rows];
+  const sortingVariantsUsed = [...usedVariants];
+  let attempts = 1;
+
+  while (
+    total !== null &&
+    mergeDataExplorerRows(pagesRows).uniqueUrlCount < total &&
+    attempts < Math.max(1, Number(o.maxPages) || 5)
+  ) {
+    const variant = nextSortingVariant(columns, usedVariants);
+    if (!variant) break;
+    usedVariants.add(variant);
+    sortingVariantsUsed.push(variant);
+    const u = new URL(initialUrl);
+    u.searchParams.set("sorting", variant);
+    const nextPage = openAndEval(o, u.toString(), readDataExplorerPage(o.wait));
+    pagesRows.push(nextPage.rows);
+    attempts += 1;
+  }
+
+  const merged = mergeDataExplorerRows(pagesRows);
+  const complete = total === null ? null : merged.uniqueUrlCount >= total;
+  const allCapturedUrls = merged.rows.map((cells) => extractRowUrl(cells)).filter(Boolean);
+  const out = {
+    projectId: id,
+    route,
+    total,
+    rowsCapturedInThisPull: merged.uniqueUrlCount,
+    parsedRowCount: merged.rows.length,
+    complete,
+    pagesFetched: attempts,
+    sortingVariantsUsed,
+    exampleUrls: allCapturedUrls.slice(0, 5),
+    allCapturedUrls,
+    rows: merged.rows,
+  };
+  if (total !== null && !complete) {
+    console.error(
+      `注意：data-explorer 报总数 ${total}，本次换排序合并抓取到 ${merged.uniqueUrlCount} 条唯一 URL，` +
+        `未覆盖全部（已尝试排序变体：${sortingVariantsUsed.join(", ") || "（无更多可试）"}）。` +
+        `Ahrefs Basic 档位这个视图既没有翻页/无限滚动控件，"导出"按钮点击也无可观测效果` +
+        `（2026-09-13 实测确认，见文件头注释），这是尽力而为的折中结果，不代表脚本有 bug。`,
+    );
+  }
+  return o.json ? JSON.stringify(out, null, 2) : (allCapturedUrls.join("\n") || "(no urls captured)");
 }
 
-if (cmd === "routes") {
-  for (const [k, v] of Object.entries(ROUTES)) console.log(`${k.padEnd(18)} ${v}`);
-  process.exit(0);
-}
-
-let text;
-try {
-  if (cmd === "projects") text = await cmdProjects(o);
-  else if (cmd === "report") text = await cmdReport(pos, o);
-  else {
-    console.error(`未知子命令：${cmd}`);
+/**
+ * schedule：只读查看项目下次排程抓取时间，复用 projects 页面（不额外导航），
+ * 全程零点击——免费/Basic 档位不支持手动立即抓取，见文件头「schedule」一节。
+ */
+async function cmdSchedule(pos, o) {
+  const [, target] = pos;
+  if (!target) {
+    console.error("用法：schedule <项目ID> [--json]");
     process.exit(1);
   }
-} catch (e) {
-  // 走到这里说明是没被 bail 接住的意外错误（bail 自己 process.exit，不会到这）。
-  // 同样先取证再关——finally 关会话毁现场正是旧版最大的坑。
-  bail(o, "unexpected-error", `执行失败：${String(e?.message || e).slice(0, 400)}`, { stack: String(e?.stack || "").slice(0, 1000) });
+  const page = openAndEval(o, `${BASE}`, readProjectsTable(o.wait));
+  requireLogin(o, page);
+  const row = (page.rows || []).find((r) => r.id === target);
+  if (!row) {
+    bail(
+      o,
+      "project-not-found-in-list",
+      `项目 ID ${target} 没有出现在项目列表里。先跑 \`projects\` 拿到有效 ID 列表。`,
+      { availableIds: (page.rows || []).map((r) => r.id) },
+    );
+  }
+  const scheduledNext = parseScheduledCell(row.cells);
+  const note =
+    "免费/Basic 档位不支持手动立即抓取；项目列表里的「开始」按钮进入的是 Always-On " +
+    "Audit 付费升级向导，本命令全程只读、不会点击任何按钮。";
+  const out = { projectId: target, scheduledNext, cellsRaw: row.cells, note };
+  if (o.json) return JSON.stringify(out, null, 2);
+  return (
+    `项目 ${target} 下次排程抓取：${scheduledNext || "（未解析到，见 cellsRaw 原始数据）"}\n${note}`
+  );
 }
 
-// 成功路径：关会话（崩溃时 daemon 不会自动清理，残留会话在用户 Chrome 里就是一个孤儿标签页）。
-closeSession(o);
+async function main() {
+  const { pos, o } = parseArgs(process.argv.slice(2));
+  const cmd = pos[0];
 
-if (o.out) {
-  const { writeFileSync } = await import("node:fs");
-  writeFileSync(o.out, text + "\n");
-  console.error(`已写入 ${o.out}`);
-} else {
-  console.log(text);
+  if (o.help || !cmd) {
+    console.log(
+      "用法：\n" +
+        "  ahrefs-site-audit.mjs projects [--json]\n" +
+        "  ahrefs-site-audit.mjs report <项目ID> <报告> [--json] [--out f] [--wait ms] [--max-pages n]\n" +
+        "  ahrefs-site-audit.mjs schedule <项目ID> [--json]\n" +
+        "  ahrefs-site-audit.mjs routes\n\n" +
+        "会话名固定 ahrefs-nav（并发度 1），不要传 --session。\n" +
+        "--retries（默认 2）控制 open 步骤遇到瞬时错误时的重试次数；\n" +
+        "--max-pages（默认 5）控制 data-explorer 页大小固定 50 时换排序重抓的最多尝试次数。\n" +
+        "失败时现场（截图+文本+manifest）落 .rankup/evidence/ahrefs-site-audit-<ts>/。",
+    );
+    process.exit(0);
+  }
+
+  if (cmd === "routes") {
+    for (const [k, v] of Object.entries(ROUTES)) console.log(`${k.padEnd(18)} ${v}`);
+    process.exit(0);
+  }
+
+  let text;
+  try {
+    if (cmd === "projects") text = await cmdProjects(o);
+    else if (cmd === "report") text = await cmdReport(pos, o);
+    else if (cmd === "schedule") text = await cmdSchedule(pos, o);
+    else {
+      console.error(`未知子命令：${cmd}`);
+      process.exit(1);
+    }
+  } catch (e) {
+    // 走到这里说明是没被 bail 接住的意外错误（bail 自己 process.exit，不会到这）。
+    // 同样先取证再关——finally 关会话毁现场正是旧版最大的坑。
+    bail(o, "unexpected-error", `执行失败：${String(e?.message || e).slice(0, 400)}`, { stack: String(e?.stack || "").slice(0, 1000) });
+  }
+
+  // 成功路径：关会话（崩溃时 daemon 不会自动清理，残留会话在用户 Chrome 里就是一个孤儿标签页）。
+  closeSession(o);
+
+  if (o.out) {
+    const { writeFileSync } = await import("node:fs");
+    writeFileSync(o.out, text + "\n");
+    console.error(`已写入 ${o.out}`);
+  } else {
+    console.log(text);
+  }
+}
+
+// argv[1] 保留调用时写的路径，import.meta.url 已经过符号链接解析——两边取真实路径
+// 再比较，同 check-version.mjs / cf-analytics-setup.mjs 的 invokedAsScript()。
+// 让测试可以只 import 上面的纯函数而不触发参数校验或真的浏览器调用。
+async function invokedAsScript() {
+  if (process.argv[1] === undefined) return false;
+  try {
+    const resolved = await realpath(resolvePath(process.argv[1]));
+    return pathToFileURL(resolved).href === import.meta.url;
+  } catch {
+    return false;
+  }
+}
+
+if (await invokedAsScript()) {
+  await main();
 }

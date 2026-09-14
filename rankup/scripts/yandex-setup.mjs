@@ -19,9 +19,11 @@
  *   --max-retries <n>     Add / Verify 按钮点击重试上限，默认 3（见下「点击竞态」）
  *
  * 依赖：opencli，且用户浏览器已登录 webmaster.yandex.com；
- * Cloudflare 凭据（DNS TXT 那一步）与 cf-zone-setup.mjs 同一套读取顺序：
- * 环境变量 CLOUDFLARE_API_TOKEN，读不到退到 <cwd>/.cf-token（已 gitignore）。
- * 真实值不打印、不落盘、不进日志。
+ * Cloudflare 凭据（DNS TXT 那一步）统一走 ./lib-cf-auth.mjs 的 resolveCfAuth
+ * （2026-09-13 收敛，历史原因见该文件头注释）：API Token 认 CLOUDFLARE_API_TOKEN
+ * 或 CF_API_TOKEN，都没有则退到 Global API Key（CF_EMAIL/CLOUDFLARE_EMAIL 配
+ * CF_GLOBAL_KEY/CLOUDFLARE_API_KEY，必须成对）。这些都没配时还会退到
+ * <cwd>/.cf-token（已 gitignore，只当 API Token 用）。真实值不打印、不落盘、不进日志。
  *
  * ── 为什么 Yandex 部分是浏览器而不是 API ──────────────────────
  *
@@ -74,6 +76,7 @@ import { fileURLToPath, pathToFileURL } from "node:url"
 import { realpath } from "node:fs/promises"
 import { readFileSync, existsSync } from "node:fs"
 import { newEvidenceDir, captureScene, writeManifest, sessionSuffix } from "./lib-scene.mjs"
+import { cfAuthHeaders as sharedCfAuthHeaders } from "./lib-cf-auth.mjs"
 
 const BASE = "https://webmaster.yandex.com"
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url))
@@ -171,28 +174,28 @@ export function parseVerificationStatus(pageText) {
   return { status: "unknown", date: null }
 }
 
-/* ── Cloudflare：与 cf-zone-setup.mjs 同一套 token 读取顺序（本文件独立实现，
- * 理由见 discipline.md 二「先查脚本清单」——两处各自 60 行的重复优于跨脚本
- * import 一个只服务两个调用点的共享文件；cf-zone-setup.mjs / cf-analytics-setup.mjs
- * 已经是这个先例）。凭据只从环境变量或 .cf-token 读，真实值不打印、不落盘。 ── */
+/* ── Cloudflare：凭据解析统一走 ./lib-cf-auth.mjs 的 resolveCfAuth（2026-09-13
+ * 收敛，历史原因见该文件头注释——本来 cf-zone-setup.mjs / cf-analytics-setup.mjs /
+ * cf-agent-baseline.mjs / cf-builds-connect.mjs / 本文件各自手搓一份，读的
+ * 环境变量名不统一，这正是要修的 bug，已经超出 discipline.md 二「两处几十行
+ * 的重复优于共享文件」判断的适用范围——那条判断针对的是只服务 1-2 个调用点、
+ * 且实现本身没有分歧的情况，不是这次涨到 5 处、分歧本身就是 bug 的情况）。
+ * 凭据只从环境变量或 .cf-token 读，真实值不打印、不落盘。 ── */
 const CF_API = "https://api.cloudflare.com/client/v4"
 
-function cfToken() {
-  if (process.env.CLOUDFLARE_API_TOKEN) return process.env.CLOUDFLARE_API_TOKEN.trim()
+/** 项目根目录下的 .cf-token（已 gitignore）：环境变量都没设置时的最后兜底，
+ * 只当 API Token 用——想用 Global Key 请直接设 CF_EMAIL/CF_GLOBAL_KEY 这对环境变量。 */
+function cfFileToken() {
   const f = join(process.cwd(), ".cf-token")
-  if (existsSync(f)) return readFileSync(f, "utf8").trim()
-  throw new Error(
-    "找不到 Cloudflare API token。export CLOUDFLARE_API_TOKEN=... 或 echo '...' > .cf-token（已 gitignore）。",
-  )
+  return existsSync(f) ? readFileSync(f, "utf8").trim() : undefined
 }
+
 function cfAuthHeaders() {
-  const t = cfToken()
-  if (t.length === 37 && /^[0-9a-f]+$/.test(t)) {
-    const email = process.env.CLOUDFLARE_EMAIL
-    if (!email) throw new Error("检测到 Global API Key，需要同时 export CLOUDFLARE_EMAIL=你的账号邮箱。")
-    return { "X-Auth-Email": email, "X-Auth-Key": t }
+  try {
+    return sharedCfAuthHeaders({ token: process.env.CLOUDFLARE_API_TOKEN || process.env.CF_API_TOKEN || cfFileToken() })
+  } catch (e) {
+    throw new Error(`${e.message}\n\n也可以把 API Token 写进 <cwd>/.cf-token（已 gitignore），环境变量都没设置时会读它。`)
   }
-  return { Authorization: `Bearer ${t}` }
 }
 async function cf(path_, init = {}) {
   const r = await fetch(`${CF_API}${path_}`, {

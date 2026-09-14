@@ -5,11 +5,12 @@ import { readFile, readdir } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { promisify } from "node:util";
+import { resolveRoots } from "./registry.mjs";
 
 const execFileAsync = promisify(execFile);
 
 const skillRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const expectedVersion = "3.12.1";
+const expectedVersion = "3.13.4";
 const requiredReferences = [
   "discipline.md",
   "monetization.md",
@@ -120,6 +121,48 @@ const projectLeakPatterns = [
   ["hardcoded local proxy", /\b127\.0\.0\.1:\d{2,5}\b/g],
   ["credential store location", /\.claude\.json\b/g],
 ];
+
+// 上面这张静态清单本身已经是独立验收指出的问题:它只能拦住"已经写进去"的
+// 代号,新开项目永远要靠人记得手工补一行,忘了补 = 这道防线对新项目形同虚设;
+// 而"往这张要开源的表里继续手打真实项目代号"这个动作本身就是又一次泄漏,
+// 不该是长期做法。因此**不再往这张静态表里追加新项目名**,新项目改走运行时
+// 补充:复用 registry.mjs 里"扫描根目录从哪来"的同一份逻辑(`resolveRoots`——
+// RANKUP_PROJECT_ROOTS 环境变量,或 `~/.rankup/config.json` 的 `projectRoots`),
+// 把这些根目录下的子目录名当额外泄露词。这份配置只存在于本机、从不进 Skill
+// 仓库;CI 环境和全新安装都没有这个文件,`resolveRoots` 返回空数组,本函数
+// 安静地不产出任何额外模式——不改变 CI 现有行为,也不会在没配置的机器上报错。
+async function buildDynamicProjectLeakPatterns() {
+  let roots;
+  try {
+    roots = await resolveRoots([]);
+  } catch {
+    return [];
+  }
+  if (!roots.length) return [];
+
+  const names = new Set();
+  for (const root of roots) {
+    let entries;
+    try {
+      entries = await readdir(root, { withFileTypes: true });
+    } catch {
+      continue; // 根目录不存在或不可读——本机配置漂移了,安静跳过,不阻断校验
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory() || entry.name.startsWith(".") || entry.name === "node_modules") continue;
+      names.add(entry.name);
+    }
+  }
+  if (!names.size) return [];
+
+  const escaped = [...names].map((name) => name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+  return [
+    [
+      "project identifier (scanned from RANKUP_PROJECT_ROOTS/config.json)",
+      new RegExp(`\\b(?:${escaped.join("|")})\\b`, "gi"),
+    ],
+  ];
+}
 
 // 这两个文件按职责必须包含上述模式的字面量(守卫本体与它的负向测试夹具),
 // 扫描时排除,否则守卫永远自我告警。除此之外任何文件都不得豁免。
@@ -280,6 +323,8 @@ async function validate() {
       text: await readFile(file, "utf8"),
     })),
   );
+  const dynamicLeakPatterns = await buildDynamicProjectLeakPatterns();
+  const allLeakPatterns = [...projectLeakPatterns, ...dynamicLeakPatterns];
   for (const { file, text } of contents) {
     const relativePath = path.relative(skillRoot, file);
     for (const [label, pattern] of secretPatterns) {
@@ -291,7 +336,7 @@ async function validate() {
     if (leakScanExcludes.has(relativePath)) {
       continue;
     }
-    for (const [label, pattern] of projectLeakPatterns) {
+    for (const [label, pattern] of allLeakPatterns) {
       pattern.lastIndex = 0;
       const match = pattern.exec(text);
       if (match) {
